@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "se3_control"))
 
 from config.robot_configs import get_robot_config, get_urdf_path, get_hw_class, add_robot_arg
 from robot_model.robot_model import RobotModel

@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "se3_control"))
 
 # ── 解析参数 ──────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="UR 机械臂硬件接口 Mock 测试")
