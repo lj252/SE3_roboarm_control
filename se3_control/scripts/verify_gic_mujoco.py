@@ -61,12 +61,14 @@ sys.path.insert(0, PROJECT_DIR)
 # 导入 Pinocchio 封装
 from robot_model.robot_model import RobotModel
 
-# 导入 SE(3) 数学工具 (复用 GUFIC 源码)
-GUFIC_DIR = os.path.join(os.path.dirname(PROJECT_DIR), 'GUFIC_mujoco-main')
-sys.path.insert(0, GUFIC_DIR)
-from gufic_env.utils.misc_func import (
-    vee_map, hat_map, adjoint_g_ed, adjoint_g_ed_deriv,
+# 导入 SE(3) 数学工具 (core.se3_math — 纯 NumPy, 自含, 无 GUFIC 依赖)
+from core.se3_math import (
+    vee_map, hat_map, rpy_to_rotmat, rotmat_to_xyz_euler, rotmat_slerp,
 )
+# 轨迹生成 (core.trajectory — 从 task_config 读取参数)
+from core.trajectory import build_trajectory
+# GIC 控制律 (core.gic_controller — 自适应带宽/阻尼)
+from core.gic_controller import GICController
 
 # 导入任务参数配置
 sys.path.insert(0, PROJECT_DIR)
@@ -75,48 +77,19 @@ from config import task_config
 # 导入机器人参数配置
 from config.robot_configs import get_robot_config, get_mesh_dir
 
+# 力交互实验分析库 (实验二: 方向解耦)
+from core.experiment_analysis import (build_decouple_inputs,
+                                      build_decouple_loop_inputs,
+                                      extract_decouple,
+                                      print_decouple_report,
+                                      plot_coupling_matrix)
+
 URDF_DIR = os.path.join(PROJECT_DIR, 'urdf')
 
 
 # ====================================================================
 # 1. URDF → MuJoCo XML 转换
 # ====================================================================
-
-def rpy_to_rotmat(rpy):
-    """URDF RPY (roll-pitch-yaw) → 3×3 旋转矩阵.
-
-    URDF 使用 ZYX 欧拉角 (绕固定轴 X→Y→Z):
-      R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
-    """
-    roll, pitch, yaw = float(rpy[0]), float(rpy[1]), float(rpy[2])
-    cx, sx = np.cos(roll), np.sin(roll)
-    cy, sy = np.cos(pitch), np.sin(pitch)
-    cz, sz = np.cos(yaw), np.sin(yaw)
-
-    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
-    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
-    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
-    return Rz @ Ry @ Rx
-
-
-def rotmat_to_xyz_euler(R):
-    """从旋转矩阵提取 XYZ 顺序欧拉角 (MuJoCo eulerseq='xyz' 约定).
-
-    MuJoCo 的 eulerseq='xyz' 对应 Rx(rx) @ Ry(ry) @ Rz(rz).
-    此函数从 R 中提取 [rx, ry, rz] 使得 R = Rx(rx) @ Ry(ry) @ Rz(rz).
-
-    :returns: ndarray (3,) — [rx, ry, rz] (弧度)
-    """
-    ry = np.arcsin(np.clip(R[0, 2], -1.0, 1.0))
-    if abs(R[0, 2]) < 0.999999:
-        rx = np.arctan2(-R[1, 2], R[2, 2])
-        rz = np.arctan2(-R[0, 1], R[0, 0])
-    else:
-        # 万向锁: cos(ry) ≈ 0, 设 rz=0 后求 rx
-        rx = np.arctan2(R[2, 1], R[1, 1])
-        rz = 0.0
-    return np.array([rx, ry, rz])
-
 
 def urdf_rpy_to_mjcf_euler(rpy):
     """URDF RPY → MJCF euler (eulerseq='xyz') 转换.
@@ -548,268 +521,32 @@ def urdf_joints_to_mujoco_xml(urdf_path, ee_frame_name='tool0',
     return '\n'.join(lines)
 
 
-# ====================================================================
-# 1b. 配置驱动的轨迹生成 (替代 GUFIC 的 initialize_trajectory)
-# ====================================================================
-
-def build_trajectory_from_config(task, cfg=None):
-    """从 task_config 模块读取参数, 用 sympy 构建轨迹函数.
-
-    返回与 GUFIC initialize_trajectory 相同的 6 元组:
-      (pd_t, Rd_t, dpd_t, dRd_t, ddpd_t, ddRd_t)
-    """
-    import sympy as sp
-
-    if cfg is None:
-        cfg = task_config
-
-    t = sp.symbols('t')
-
-    # 从 cfg 读取任务参数
-    task_cfg = getattr(cfg, task, {})
-
-    # 默认朝向 (3x3 旋转矩阵, 行优先展开的 9 个数字)
-    flat_R = task_cfg.get('orientation',
-                          [0, 1, 0, 1, 0, 0, 0, 0, -1])
-    Rd_default = np.array(flat_R, dtype=float).reshape(3, 3)
-
-    if task == 'regulation':
-        center = task_cfg.get('target', [0.5, 0.0, 0.125])
-        pd_default = np.array(center, dtype=float)
-        pd_t_sim = sp.Matrix(pd_default)
-        Rd_t_sim = sp.Matrix(Rd_default)
-
-    elif task == 'circle':
-        center = task_cfg.get('center', [0.5, 0.0, 0.125])
-        radius = task_cfg.get('radius', 0.1)
-        speed = task_cfg.get('speed', 1.0)
-        pd_default = np.array(center, dtype=float)
-        pd_t_sim = (sp.Matrix(pd_default)
-                    + sp.Matrix([radius * sp.cos(speed * t),
-                                 radius * sp.sin(speed * t),
-                                 0]))
-        Rd_t_sim = sp.Matrix(Rd_default)
-
-    elif task == 'line':
-        center = task_cfg.get('center', [0.5, 0.0, 0.125])
-        amplitude = task_cfg.get('amplitude', 0.1)
-        direction = task_cfg.get('direction', [0, 1, 0])
-        freq = task_cfg.get('frequency', 0.5)
-        pd_default = np.array(center, dtype=float)
-        # 归一化方向向量
-        d = np.array(direction, dtype=float)
-        d_norm = d / np.linalg.norm(d) if np.linalg.norm(d) > 0 else np.array([0, 1, 0])
-        offset = amplitude * d_norm  # [dx, dy, dz] * A
-        pd_t_sim = (sp.Matrix(pd_default)
-                    + sp.Matrix(offset.tolist()) * sp.sin(freq * t))
-        Rd_t_sim = sp.Matrix(Rd_default)
-
-    elif task == 'sphere':
-        # sphere 暂时保持原有默认值
-        pd_default = np.array(task_cfg.get('center', [0.40, 0.0, 0.0]))
-        max_time_val = task_cfg.get('max_time', 10.0)
-        total_radian = 0.5 * np.pi
-        omega_value = total_radian / max_time_val
-        theta_y = omega_value * t - total_radian * 0.5
-        r_sphere = task_cfg.get('radius', 0.304)
-        pd_t_sim = (sp.Matrix(pd_default)
-                    + sp.Matrix([0,
-                                 r_sphere * sp.sin(theta_y),
-                                 -0.10 + r_sphere * sp.cos(theta_y)]))
-        rotmat_y = sp.Matrix([[sp.cos(-theta_y), 0, sp.sin(-theta_y)],
-                              [0, 1, 0],
-                              [-sp.sin(-theta_y), 0, sp.cos(-theta_y)]])
-        Rd_t_sim = sp.Matrix(Rd_default) @ rotmat_y
-
-    else:
-        raise ValueError(f"Unknown task: {task}")
-
-    # 符号微分 → 数值函数
-    dpd_t_sim = sp.diff(pd_t_sim, t)
-    dRd_t_sim = sp.diff(Rd_t_sim, t)
-    ddpd_t_sim = sp.diff(dpd_t_sim, t)
-    ddRd_t_sim = sp.diff(dRd_t_sim, t)
-
-    pd_t = sp.lambdify(t, pd_t_sim, "numpy")
-    Rd_t = sp.lambdify(t, Rd_t_sim, "numpy")
-    dpd_t = sp.lambdify(t, dpd_t_sim, "numpy")
-    dRd_t = sp.lambdify(t, dRd_t_sim, "numpy")
-    ddpd_t = sp.lambdify(t, ddpd_t_sim, "numpy")
-    ddRd_t = sp.lambdify(t, ddRd_t_sim, "numpy")
-
-    return pd_t, Rd_t, dpd_t, dRd_t, ddpd_t, ddRd_t
-
-
-def load_gains_from_config(task, cfg=None):
-    """从 task_config 读取 GIC 控制器增益."""
-    if cfg is None:
-        cfg = task_config
-
-    gains_cfg = cfg.gains
-
-    if task == 'regulation':
-        g = gains_cfg.get('regulation', {})
-    else:
-        g = gains_cfg.get('tracking', {})
-
-    # 兼容 robot-specific overrides: 若 `gains` 中已有直接定义好的 kp/kr/kd 矩阵则直接使用
-    if 'kp_matrix' in g:
-        return g['kp_matrix'], g['kr_matrix'], g['kd_matrix']
-
-    kp_vals = g.get('kp', [2500, 2500, 1500])
-    kr_vals = g.get('kr', [2000, 2000, 2000])
-    kd_vals = g.get('kd', [500, 500, 500, 500, 500, 500])
-
-    Kp = np.eye(3) * np.array(kp_vals, dtype=float)
-    KR = np.eye(3) * np.array(kr_vals, dtype=float)
-    Kd = np.eye(6) * np.array(kd_vals, dtype=float)
-    return Kp, KR, Kd
-
-
-def _rotmat_slerp(R1, R2, alpha):
-    """SO(3) 球面线性插值 (SLERP): 从 R1 到 R2, 因子 alpha ∈ [0,1].
-
-    :param R1: 起始旋转矩阵 (3,3)
-    :param R2: 终止旋转矩阵 (3,3)
-    :param alpha: 插值因子, 0 → R1, 1 → R2
-    :returns: 插值后的旋转矩阵 (3,3)
-    """
-    # 计算相对旋转
-    R_rel = R1.T @ R2
-    # 提取旋转角度
-    cos_theta = (np.trace(R_rel) - 1.0) / 2.0
-    cos_theta = np.clip(cos_theta, -1.0, 1.0)
-    theta = np.arccos(cos_theta)
-
-    if theta < 1e-10:
-        return R2.copy()
-
-    # 提取旋转轴 (单位向量)
-    sin_theta = np.sin(theta)
-    omega = np.array([
-        R_rel[2, 1] - R_rel[1, 2],
-        R_rel[0, 2] - R_rel[2, 0],
-        R_rel[1, 0] - R_rel[0, 1],
-    ])
-    omega_norm = np.linalg.norm(omega)
-    if omega_norm < 1e-10:
-        # 180° 旋转, 轴无法从反对称部分提取
-        # 使用备选方法: 找 R_rel 的特征向量 (特征值=1)
-        # 简化处理: 线性插值 + 重正交化
-        R_lerp = (1 - alpha) * R1 + alpha * R2
-        U, _, Vt = np.linalg.svd(R_lerp)
-        return U @ Vt
-
-    axis = omega / (2.0 * sin_theta)  # 单位旋转轴
-    n_hat = np.array([
-        [0, -axis[2], axis[1]],
-        [axis[2], 0, -axis[0]],
-        [-axis[1], axis[0], 0],
-    ])
-
-    # Rodrigues 旋转公式 (旋转 alpha*theta 弧度)
-    cos_at = np.cos(alpha * theta)
-    sin_at = np.sin(alpha * theta)
-    R_alpha = (np.eye(3)
-               + sin_at * n_hat
-               + (1 - cos_at) * (n_hat @ n_hat))
-
-    return R1 @ R_alpha
+# ────────────────────────────────────────────────────────────────────
+# 以下内联实现均已迁移至 core/:
+#   - GIC 控制律          → core.gic_controller.GICController
+#   - 轨迹生成            → core.trajectory.build_trajectory
+#   - 朝向 SLERP          → core.se3_math.rotmat_slerp
+#   - SE(3) 数学          → core.se3_math (vee_map/hat_map/rpy/xyz_euler)
+#   - 固定增益加载        → 已随固定增益路径移除 (见 GIC_plan Phase 2)
+# 与旧内联版差异仅一处: 旧版 e_pos = Rᵀ·Rd·Rdᵀ·(p-pd) = Rᵀ·(p-pd) (RdᵀRd=I),
+# 等价于 core 版的 e_pos = Rᵀ·(p-pd)。自适应带宽/阻尼从 task_config.controller 读取。
+# ────────────────────────────────────────────────────────────────────
 
 
 # ====================================================================
-# 2. GIC 控制律 (与 GUFIC 源码一致, 但使用 RobotModel)
-# ====================================================================
-
-class GICController:
-    """GIC 控制律 — 自适应 M_tilde 增益.
-
-    M_tilde 在平移(kg)和旋转(kg·m²)间差异达 10⁵ 倍,
-    固定增益会令腕关节过刚/过阻尼 → 数值发散.
-    此实现根据期望带宽 ω_des 和阻尼比 ζ 自适应:
-
-      K_adapt = ω²·M_tilde
-      D_adapt = 2ζω·M_tilde
-      τ̃ = M̃·dVd* + D_adapt·ev + K_adapt·e_op
-    """
-
-    def __init__(self, robot_model, Kp=None, KR=None, Kd=None, dt=0.001, cfg=None,
-                 torque_limits=None):
-        self.robot = robot_model
-        self.dt = dt
-        # 从 config 读取期望带宽与阻尼比
-        if cfg is None:
-            cfg = task_config
-        ctrl_cfg = cfg.controller
-        self._w_des = ctrl_cfg.get('bandwidth', 30.0)   # rad/s, ≈5Hz
-        self._zeta_des = ctrl_cfg.get('damping', 1.0)    # 临界阻尼
-        # 力矩限幅 (来自 robot_configs, 若未指定则用默认值)
-        if torque_limits is not None:
-            self._tau_limits = np.asarray(torque_limits, dtype=float).ravel()
-        else:
-            self._tau_limits = None
-
-    def compute(self, q, dq, pd, Rd, vd, wd, dvd, dwd, Fe_raw=None):
-        """GIC 控制律."""
-        self.robot.update(q, dq)
-        p, R = self.robot.get_pose()
-        M = self.robot.get_full_inertia()
-        nv = M.shape[0]
-        qfrc_bias = self.robot.get_bias_torque()
-        Jb = self.robot.get_body_jacobian()
-
-        # SE(3) 误差
-        g = np.eye(4); g[:3,:3] = R; g[:3,3] = p
-        gd = np.eye(4); gd[:3,:3] = Rd; gd[:3,3] = pd
-        g_ed = np.linalg.inv(g) @ gd
-
-        Vd = np.hstack((vd, wd)).reshape((-1, 1))
-        dVd = np.hstack((dvd, dwd)).reshape((-1, 1))
-        Vd_star = adjoint_g_ed(g_ed) @ Vd
-        dVd_star = (adjoint_g_ed_deriv(g, gd, vd, wd, dvd, dwd) @ Vd
-                     + adjoint_g_ed(g_ed) @ dVd)
-
-        # SE(3) 误差: e_op = [p-pd; vee(RdᵀR - RᵀRd)] (体坐标系)
-        e_pos = R.T @ Rd @ Rd.T @ (p - pd).reshape((-1, 1))  # = R.T @ (p-pd)
-        e_rot = vee_map(Rd.T @ R - R.T @ Rd)
-        e_op = np.vstack((e_pos, e_rot))
-
-        Vb = self.robot.get_body_ee_velocity()
-        ev = Vb - Vd_star
-
-        # 操作空间惯性
-        M_inv = np.linalg.solve(M, np.eye(nv))
-        M_tilde_inv = Jb @ M_inv @ Jb.T
-        U_t, s_t, Vt_t = np.linalg.svd(M_tilde_inv)
-        damp_sv = max(1e-6, 0.1 * s_t[-1]) if len(s_t) > 0 else 1e-6
-        s_damped = s_t / (s_t**2 + damp_sv**2)
-        M_tilde = (Vt_t.T * s_damped) @ U_t.T
-
-        # 自适应阻抗
-        w2 = self._w_des ** 2
-        z2w = 2 * self._zeta_des * self._w_des
-        K_adapt = w2 * M_tilde
-        D_adapt = z2w * M_tilde
-
-        # 控制律: τ̃ = M̃·dVd* - D·ev - K·e_op  (负反馈)
-        tau_tilde = M_tilde @ dVd_star - D_adapt @ ev - K_adapt @ e_op
-
-        tau_cmd = (Jb.T @ tau_tilde + qfrc_bias.reshape((-1, 1))).ravel()
-        if self._tau_limits is not None:
-            tau_limits = self._tau_limits[:nv]
-            tau_cmd = np.clip(tau_cmd, -tau_limits, tau_limits)
-        return tau_cmd
-
-
-# ====================================================================
-# 3. 仿真运行
+# 2. 仿真运行
 # ====================================================================
 
 def run_verification(robot_urdf, task='regulation', show_viewer=True,
                      max_time=5.0, home_q=None, ee_frame='tool0',
                      link_to_mesh=None, mesh_subdir='',
                      torque_limits=None,
-                     verbose=True, stop_at_end=True, loop=False):
+                     verbose=True, stop_at_end=True, loop=False,
+                     # ── 力交互实验 (实验二: 方向解耦) ──
+                     experiment='none',
+                     decouple_force=10.0, decouple_moment=1.0,
+                     decouple_settle=2.0, decouple_measure=1.0,
+                     decouple_loop=False, decouple_cycles=2):
     """主验证循环.
 
     步骤:
@@ -872,14 +609,42 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
                        robot_name=os.path.basename(robot_urdf), verbose=verbose)
 
     if home_q is None:
-        # 生成一个非奇异的默认位形 (避免 wrist_2=0)
-        home_q = np.array([0.0, -1.2, 0.5, -0.8, 0.3, 0.5])[:robot.nv]
+        # 默认舒适位形: 与 robot_configs 'ur12e' 的 home_q 一致
+        # (EE 在 [0.50, 0, 0.50], 末端竖直朝下, 避开腕部奇异)
+        home_q = np.array([-0.356, -1.498, 1.81, 1.259, 1.571, -0.124])[:robot.nv]
 
     if verbose:
         print(f"[Home] q = {home_q}")
 
     # ── 3. 初始化状态与轨迹 ──
     dt = model.opt.timestep
+
+    # ── 实验配置 (方向解耦: 7 块 = 基线 + 6 输入, 物理外力施加;
+    #    --decouple-loop 可视化循环: 动作间插复位间隙, 序列循环) ──
+    # 末端 body id: 物理外力 (xfrc_applied) 作用点 (作用在其 COM)
+    ee_body_id = model.site_bodyid[0] if model.nsite > 0 else 0
+    decouple_inputs = None
+    if experiment == 'decouple':
+        if decouple_loop:
+            decouple_inputs = build_decouple_loop_inputs(
+                force=decouple_force, moment=decouple_moment)
+            decouple_block = decouple_settle + decouple_measure
+            decouple_total = (len(decouple_inputs) * decouple_block
+                              * decouple_cycles)
+            if max_time <= 5.0:
+                max_time = decouple_total
+                print(f"[GIC decouple-loop] Auto max_time = {max_time:.1f}s "
+                      f"({len(decouple_inputs)} 子块 × {decouple_block:.1f}s "
+                      f"× {decouple_cycles} 循环; 关闭 viewer 可提前停止)")
+        else:
+            decouple_inputs = build_decouple_inputs(force=decouple_force,
+                                                    moment=decouple_moment)
+            decouple_block = decouple_settle + decouple_measure
+            decouple_total = len(decouple_inputs) * decouple_block
+            if max_time <= 5.0:
+                max_time = decouple_total
+                print(f"[GIC decouple] Auto max_time = {max_time:.1f}s "
+                      f"({len(decouple_inputs)} blocks × {decouple_block:.1f}s)")
     T = int(max_time / dt)
 
     # 根据任务类型初始化轨迹
@@ -900,7 +665,7 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
     else:
         # 动态任务: 从 config 读取参数生成轨迹
         # (直接使用 config 坐标, 不做偏移)
-        pd_t, Rd_t, dpd_t, dRd_t, ddpd_t, ddRd_t = build_trajectory_from_config(task)
+        pd_t, Rd_t, dpd_t, dRd_t, ddpd_t, ddRd_t = build_trajectory(task, cfg=task_config)
         if verbose:
             print(f"[Trajectory] start  = {pd_t(0).ravel()}")
             print(f"[Trajectory] center = {getattr(task_config, task, {}).get('center', 'N/A')}")
@@ -925,8 +690,6 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
             print(f"[IK] pos_err = {np.linalg.norm(p_start - pd0):.6e}")
             print(f"[IK] rot_err = {np.linalg.norm(R_start - R_home):.6e}")
 
-    Kp, KR, Kd = load_gains_from_config(task, cfg=task_config)
-
     # ── 4. 朝向渐进混合 (非 regulation 任务) ──
     # 避免初始朝向误差 (R_home vs Rd(0)) 导致力矩饱和和跟踪发散
     BLEND_DURATION = 0.4  # 0.4 秒内从 home 朝向过渡到轨迹朝向
@@ -948,8 +711,12 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
         print(f"[Verify] Desired p0 = {pd_t(0)}")
 
     # ── 5. 控制器 ──
-    controller = GICController(robot, Kp, KR, Kd, dt, cfg=task_config,
-                               torque_limits=torque_limits)
+    controller = GICController(
+        robot,
+        bandwidth=task_config.controller.get('bandwidth', 30.0),
+        damping=task_config.controller.get('damping', 1.0),
+        torque_limits=torque_limits,
+    )
 
     if verbose:
         # 验证正运动学一致性 (使用 MuJoCo 中的实际状态)
@@ -973,6 +740,7 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
         'rot_err': np.zeros(T),
         'q': np.zeros((T, nv)),
         'dq': np.zeros((T, nv)),
+        'f_ext': np.zeros((T, 6)),   # 物理施加外力 (世界系)
     }
 
     # ── 6. Viewer ──
@@ -1004,13 +772,20 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
     for i in range(T):
         t = i * dt
 
+        # 关闭 viewer 立即停止仿真 (所有模式通用)
+        if viewer is not None and not viewer.is_running():
+            if verbose:
+                print(f"[Viewer] closed — stopping simulation early "
+                      f"(t={t:.1f}s).")
+            break
+
         # 期望轨迹
         pd = pd_t(t).ravel()
         Rd_des = Rd_t(t).reshape((3, 3))
         # 朝向渐进混合: 前 BLEND_DURATION 秒从 home 朝向平滑过渡到期望朝向
         if is_dynamic_task and t < BLEND_DURATION:
             alpha = t / BLEND_DURATION
-            Rd = _rotmat_slerp(R_home_ik, Rd_des, alpha)
+            Rd = rotmat_slerp(R_home_ik, Rd_des, alpha)
         else:
             Rd = Rd_des
         # 由于 Rd 被修改, dRd 也需对应调整: 混合期间使用衰减后的轨迹 dRd
@@ -1031,7 +806,22 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
         q = data.qpos[:nv].copy()
         dq = data.qvel[:nv].copy()
 
-        # 用 RobotModel 计算 GIC 控制力矩
+        # ── 物理外力施加 (实验二: 方向解耦) — GIC 被动响应, 不读力 ──
+        if experiment == 'decouple':
+            k_block = int(t // decouple_block)
+            if decouple_loop:
+                k_block = k_block % len(decouple_inputs)   # 循环模式: 取模
+            elif k_block >= len(decouple_inputs):
+                k_block = len(decouple_inputs) - 1
+            F_world = decouple_inputs[k_block]
+            if model.nsite > 0:
+                # 世界系恒力/力偶施加到末端 body COM (物理作用, 控制器不知情)
+                data.xfrc_applied[ee_body_id, :] = F_world
+            log['f_ext'][i] = F_world
+        else:
+            log['f_ext'][i] = np.zeros(6)
+
+        # 用 RobotModel 计算 GIC 控制力矩 (被动阻抗, Fe_raw=None)
         tau_cmd = controller.compute(q, dq, pd, Rd, vd, wd, dvd, dwd)
 
         # 应用力矩到 MuJoCo
@@ -1174,11 +964,24 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
             time.sleep(1)
         viewer.close()
 
+    # ── 9. 方向解耦实验分析 (循环模式为可视化, 跳过定量报告) ──
+    if experiment == 'decouple' and not decouple_loop:
+        try:
+            res = extract_decouple(log, decouple_settle, decouple_measure,
+                                   inputs=decouple_inputs)
+            log['decouple'] = res
+            print_decouple_report(res, 'GIC')
+            save_path = os.path.join(PROJECT_DIR, 'figures', 'decouple',
+                                     'gic_decouple.png')
+            plot_coupling_matrix(res, 'GIC', save_path=save_path)
+        except Exception as e:
+            print(f"[GIC decouple] Analysis failed: {e}")
+
     return log, robot
 
 
 # ====================================================================
-# 4. 绘图与结果分析
+# 3. 绘图与结果分析
 # ====================================================================
 
 def plot_results(log, save_path=None):
@@ -1294,7 +1097,7 @@ def plot_results(log, save_path=None):
 
 
 # ====================================================================
-# 5. 对比验证: Pinocchio vs MuJoCo 雅可比/惯性
+# 4. 对比验证: Pinocchio vs MuJoCo 雅可比/惯性
 # ====================================================================
 
 def cross_validate_models(urdf_path, ee_frame='tool0', test_q=None):
@@ -1398,7 +1201,7 @@ def cross_validate_models(urdf_path, ee_frame='tool0', test_q=None):
 
 
 # ====================================================================
-# 6. 主入口
+# 5. 主入口
 # ====================================================================
 
 if __name__ == '__main__':
@@ -1421,7 +1224,42 @@ if __name__ == '__main__':
                         help='Do not pause at final pose (default: pause)')
     parser.add_argument('--no-loop', action='store_true',
                         help='Disable continuous task loop (default: loop for circle/line)')
+
+    # ── 力交互实验 (实验二: 方向解耦) ──
+    parser.add_argument('--experiment', type=str, default='none',
+                        choices=['none', 'decouple'],
+                        help='External force experiment '
+                             '(decouple = 方向解耦, 7 块: 基线+6 输入)')
+    parser.add_argument('--decouple-force', type=float, default=None,
+                        help='解耦实验轴向力幅值 (N), 默认 10.0')
+    parser.add_argument('--decouple-moment', type=float, default=None,
+                        help='解耦实验力偶幅值 (Nm), 默认 1.0')
+    parser.add_argument('--decouple-settle', type=float, default=None,
+                        help='每块过渡时间 (s), 默认 2.0')
+    parser.add_argument('--decouple-measure', type=float, default=None,
+                        help='每块稳态测量时间 (s), 默认 1.0')
+    parser.add_argument('--decouple-loop', action='store_true',
+                        help='可视化循环模式: 动作间插复位间隙, 序列循环运行 '
+                             '(幅值/时长取 experiments.decouple_loop 配置)')
+
     args = parser.parse_args()
+
+    # 实验参数默认值 (来自 task_config.experiments;
+    #   --decouple-loop 时取 decouple_loop 段: 更大位移/更长时长)
+    _dec_cfg = (task_config.experiments.get('decouple_loop', {})
+                if args.decouple_loop
+                else task_config.experiments.get('decouple', {}))
+    decouple_force = (args.decouple_force if args.decouple_force is not None
+                      else _dec_cfg.get('force', 10.0))
+    decouple_moment = (args.decouple_moment if args.decouple_moment is not None
+                       else _dec_cfg.get('moment', 1.0))
+    decouple_settle = (args.decouple_settle if args.decouple_settle is not None
+                       else _dec_cfg.get('settle', 2.0))
+    decouple_measure = (args.decouple_measure
+                        if args.decouple_measure is not None
+                        else _dec_cfg.get('measure', 1.0))
+    decouple_loop = args.decouple_loop
+    decouple_cycles = _dec_cfg.get('cycles', 2)
 
     # 选择 URDF — 从 robot_configs 加载 UR 系列机器人参数
     if args.robot in ('ur12e', 'ur3'):
@@ -1465,6 +1303,11 @@ if __name__ == '__main__':
         verbose=True,
         stop_at_end=not args.no_stop,
         loop=do_loop,
+        # 力交互实验 (实验二)
+        experiment=args.experiment,
+        decouple_force=decouple_force, decouple_moment=decouple_moment,
+        decouple_settle=decouple_settle, decouple_measure=decouple_measure,
+        decouple_loop=decouple_loop, decouple_cycles=decouple_cycles,
     )
 
     # 绘图

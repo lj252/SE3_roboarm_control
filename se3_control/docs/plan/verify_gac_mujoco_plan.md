@@ -1,6 +1,6 @@
 # verify_gac_mujoco.py — MuJoCo + Pinocchio 联合验证 GAC 导纳控制计划
 
-> 关联: [GAC_plan.md](./GAC_plan.md) | [run_se3_control_usage.md](./run_se3_control_usage.md)
+> 关联: [GAC_plan.md](./GAC_plan.md) | [run_se3_control_usage.md](../usages/run_se3_control_usage.md)
 > 下游: `se3_control/scripts/verify_gac_mujoco.py`
 
 ---

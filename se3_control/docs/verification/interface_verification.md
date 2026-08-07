@@ -1,6 +1,6 @@
 # RobotHWInterface 与 ur_rtde 对接验证
 
-> 关联文档: [interface_plan.md](./interface_plan.md) | [interface_URtest_usages.md](./interface_URtest_usages.md)
+> 关联文档: [interface_plan.md](../plan/interface_plan.md) | [interface_URtest_usages.md](../usages/interface_URtest_usages.md)
 > 验证目标: UR12eHW / UR3HW ↔ ur_rtde 接口对接正确性
 >
 > **新功能**: 所有脚本支持 ``--robot ur12e|ur3`` 参数，自动切换机械臂配置。

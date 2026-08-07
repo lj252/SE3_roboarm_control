@@ -1,6 +1,6 @@
 # tests/ — 测试脚本使用说明
 
-> 关联: [GAC_plan.md](../se3_control/docs/GAC_plan.md) | [GIC_plan.md](../se3_control/docs/GIC_plan.md)
+> 关联: [GAC_plan.md](../se3_control/docs/plan/GAC_plan.md) | [GIC_plan.md](../se3_control/docs/plan/GIC_plan.md)
 
 ---
 

@@ -77,8 +77,8 @@ model = RobotModel(
 ```python
 import numpy as np
 
-# 设定关节角度（rad）
-q = np.array([0.0, -1.2, 0.5, -0.8, 0.3, 0.5])
+# 设定关节角度（rad）— 默认舒适位形 (EE≈[0.50,0,0.50], 末端竖直朝下)
+q = np.array([-0.356, -1.498, 1.81, 1.259, 1.571, -0.124])
 dq = np.zeros(6)
 
 # 更新计算
@@ -129,8 +129,8 @@ C = model.get_coriolis_matrix()          # 科氏力矩阵 C(q, dq)
 pd = np.array([0.4, 0.0, 0.3])
 Rd = np.eye(3)
 
-# 初始关节猜测
-q_init = np.array([0.0, -1.2, 0.5, -0.8, 0.3, 0.5])
+# 初始关节猜测 (默认舒适位形)
+q_init = np.array([-0.356, -1.498, 1.81, 1.259, 1.571, -0.124])
 
 # 高斯-牛顿法（Levenberg-Marquardt）求解
 q_solution = model.gauss_newton_IK(
@@ -367,6 +367,6 @@ MuJoCo 的 body 坐标系定义与 URDF 不同。`verify_gic_mujoco.py` 中的 `
 
 ## 索引
 
-- [代码中的前置知识](README/代码中的前置知识.md) — 李群、SE(3)、能量油箱等数学背景
-- [部署方案 — GIC-only](docs/deploy_se3_gic_to_ur12_plan.md) — 纯阻抗控制实机部署计划
-- [部署方案 — GUFIC](docs/deploy_se3_to_hardware_plan.md) — 统一力-阻抗控制实机部署计划
+- [代码中的前置知识](../../../README/代码中的前置知识.md) — 李群、SE(3)、能量油箱等数学背景
+- [部署方案 — GIC-only](../../../docs/deploy_se3_gic_to_ur12_plan.md) — 纯阻抗控制实机部署计划
+- [部署方案 — GUFIC](../../../docs/deploy_se3_to_hardware_plan.md) — 统一力-阻抗控制实机部署计划

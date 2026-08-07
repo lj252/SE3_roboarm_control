@@ -410,12 +410,17 @@ SE3_roboarm_control/
 │   │   └── test_regulation.py         # Layer 3: 调节控制
 │   │
 │   └── docs/
-│       ├── robot_model_usages.md
-│       ├── interface_plan.md
-│       ├── interface_URtest_usages.md
-│       ├── interface_verification.md
-│       ├── GIC_plan.md
-│       └── run_se3_control_usage.md
+│       ├── plan/
+│       │   ├── GIC_plan.md
+│       │   ├── GAC_plan.md
+│       │   ├── interface_plan.md
+│       │   └── verify_gac_mujoco_plan.md
+│       ├── usages/
+│       │   ├── robot_model_usages.md
+│       │   ├── interface_URtest_usages.md
+│       │   └── run_se3_control_usage.md
+│       └── verification/
+│           └── interface_verification.md
 │
 └── GUFIC_mujoco-main/                 # 上游 GUFIC 仿真代码
 ```

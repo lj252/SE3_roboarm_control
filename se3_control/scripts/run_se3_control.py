@@ -593,7 +593,9 @@ def run_simulation(robot_urdf, task='regulation', show_viewer=True,
                        verbose=verbose)
 
     if home_q is None:
-        home_q = np.array([0.0, -1.2, 0.5, -0.8, 0.3, 0.5])[:robot.nv]
+        # 默认舒适位形: 与 robot_configs 'ur12e' 的 home_q 一致
+        # (EE 在 [0.50, 0, 0.50], 末端竖直朝下, 避开腕部奇异)
+        home_q = np.array([-0.356, -1.498, 1.81, 1.259, 1.571, -0.124])[:robot.nv]
 
     if verbose:
         print(f"[Home] q = {home_q}")

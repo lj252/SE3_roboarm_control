@@ -507,10 +507,12 @@ SS6.3: Cross-platform matches single-platform
 - *paper/Phase1_research/创新论文方案推荐.md*
 - *paper/Phase2_/serialized-mapping-frost.md (ARS chapter plan)*
 - *docs/deploy_se3_to_hardware_plan.md*
-- *se3_control/docs/GIC_plan.md*
-- *se3_control/docs/interface_plan.md*
-- *se3_control/docs/interface_verification.md*
-- *se3_control/docs/interface_URtest_usages.md*
-- *se3_control/docs/robot_model_usages.md*
-- *se3_control/docs/run_se3_control_usage.md*
+- *se3_control/docs/plan/GIC_plan.md*
+- *se3_control/docs/plan/GAC_plan.md*
+- *se3_control/docs/plan/interface_plan.md*
+- *se3_control/docs/plan/verify_gac_mujoco_plan.md*
+- *se3_control/docs/usages/interface_URtest_usages.md*
+- *se3_control/docs/usages/robot_model_usages.md*
+- *se3_control/docs/usages/run_se3_control_usage.md*
+- *se3_control/docs/verification/interface_verification.md*
 - *se3_control/ source code (structure and interfaces)*

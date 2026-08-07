@@ -70,8 +70,11 @@ ROBOT_CONFIGS: Dict[str, Dict[str, Any]] = {
             "wrist_3_joint",
         ],
 
-        # MuJoCo 仿真
-        'home_q':              np.array([0.0, -1.2, 0.5, -0.8, 0.3, 0.5]),
+        # MuJoCo 仿真 — 舒适默认位: EE 在 [0.50, 0, 0.50] (m), 末端竖直朝下
+        # (工具 z 轴 = [0,0,-1], 倾角 0°). q5 = +90° 处于腕部条件最佳区域
+        # (腕部奇异在 q5 = 0/±180°, 即 wrist_1∥wrist_3).
+        # 调节任务期望位姿 = FK(home_q), 故解耦/扫频实验的工作位姿也随之降低.
+        'home_q':              np.array([-0.356, -1.498, 1.81, 1.259, 1.571, -0.124]),
 
         # 网格可视化
         'mesh_subdir':         'UR12e/',   # urdf/meshes/UR12e/
@@ -130,7 +133,9 @@ ROBOT_CONFIGS: Dict[str, Dict[str, Any]] = {
             "wrist_3_joint",
         ],
 
-        'home_q':              np.array([0.0, -1.2, 0.5, -0.8, 0.3, 0.5]),
+        # 舒适默认位: EE 在 [0.35, 0, 0.35] (m), 末端竖直朝下 (倾角 0°).
+        # q5 = -90° 处于腕部条件最佳区域 (奇异在 q5 = 0/±180°) (UR3 工作空间小).
+        'home_q':              np.array([-0.327, -1.42, 1.236, -1.386, -1.571, 2.738]),
 
         'mesh_subdir':         'UR3/',     # urdf/meshes/UR3/
         'link_to_mesh': {

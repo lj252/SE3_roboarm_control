@@ -1,7 +1,7 @@
 # GAC 导纳控制核心实现计划 — Phase 2.5
 
 > 在 GIC 阻抗控制的基础上，实现 SE(3) 导纳控制（Admittance Control），完成阻抗-导纳对偶闭环
-> 关联文档: [GIC_plan.md](./GIC_plan.md) | [deploy_se3_to_hardware_plan.md](./deploy_se3_to_hardware_plan.md)
+> 关联文档: [GIC_plan.md](./GIC_plan.md) | [deploy_se3_to_hardware_plan.md](../../../docs/deploy_se3_to_hardware_plan.md)
 
 ---
 

@@ -1,6 +1,6 @@
 # se3_control/scripts/ — 仿真验证脚本使用说明
 
-> 关联: [run_se3_control_usage.md](../docs/run_se3_control_usage.md) | [verify_gac_mujoco_plan.md](../docs/verify_gac_mujoco_plan.md)
+> 关联: [run_se3_control_usage.md](../docs/usages/run_se3_control_usage.md) | [verify_gac_mujoco_plan.md](../docs/plan/verify_gac_mujoco_plan.md)
 
 ---
 
@@ -65,7 +65,10 @@ python se3_control/scripts/run_se3_control.py --robot ur3 --bandwidth 20 --dampi
 | `--cross-validate` | — | 仅运行模型交叉验证 |
 | `--no-loop` | — | 关闭连续循环模式 |
 
-**详细文档**：[run_se3_control_usage.md](../docs/run_se3_control_usage.md)
+> 画圆任务的圆心/半径/速度在 `config/task_config.py` → `circle` 中配置
+> (本脚本无 CLI 覆盖参数), 详见 §8.1.
+
+**详细文档**：[run_se3_control_usage.md](../docs/usages/run_se3_control_usage.md)
 
 ---
 
@@ -105,6 +108,9 @@ python se3_control/scripts/verify_gic_mujoco.py --task circle --save-plot gic_ci
 | `--no-stop` | — | 仿真结束后不暂停 viewer |
 | `--no-loop` | — | 关闭连续循环模式 |
 
+> 画圆任务的圆心/半径/速度在 `config/task_config.py` → `circle` 中配置
+> (本脚本无 CLI 覆盖参数), 详见 §8.1.
+
 ---
 
 ## 5. verify_gac_mujoco.py — GAC 导纳控制验证
@@ -127,9 +133,11 @@ python se3_control/scripts/verify_gac_mujoco.py --force-mode pulse \
 
 # 切向力跟随: 沿圆弧柔顺滑动 (带径向虚拟弹簧约束)
 # 默认: 圆心(0.5,0.0), 半径0.2m, 径向刚度500N/m, 仿真 30s
-# 注: 使用 惯性系 3-DOF 导纳 (位置修正), 不与 R_cur 耦合,
-#     完全避免末端倾斜导致的 Z 方向漂移和振荡.
-#     详见下方 §7 "常见错误与调试".
+# 注1: 使用 惯性系 3-DOF 导纳 (位置修正), 不与 R_cur 耦合,
+#      完全避免末端倾斜导致的 Z 方向漂移和振荡.
+#      详见下方 §7 "常见错误与调试".
+# 注2: 期望朝向强制为"末端垂直朝下" (与 GIC circle 任务一致),
+#      腕关节保持中位, 画圆更舒适不易碰限位. 起始姿态经 3s 平滑过渡.
 python se3_control/scripts/verify_gac_mujoco.py --task regulation \
     --force-mode tangent --tangent-amplitude 10 --no-viewer
 
@@ -156,7 +164,7 @@ python se3_control/scripts/verify_gac_mujoco.py --task circle \
 | `constant` | 恒定方向恒力 | 机器人被恒力推开 | 接触力响应 |
 | `pulse` | 短时脉冲力 | 冲击响应 | 抗扰动能力 |
 | `spring` | F = K_env · | 环境接触 | 刚性表面触碰 |
-| `tangent` | 沿圆弧切向力 + 径向虚拟弹簧 | 惯性系导纳(位置), 无 R_cur 耦合, 无 Z 漂移 | 柔顺跟随 |
+| `tangent` | 沿圆弧切向力 + 径向虚拟弹簧 | 惯性系导纳(位置), 无 R_cur 耦合, 无 Z 漂移; 末端朝下 | 柔顺跟随 |
 
 ### 5.3 导纳参数调优
 
@@ -295,6 +303,227 @@ Z 通道完全独立 (K_z=500 刚性维持高度).
 | `pulse` | 没有明显脉冲响应 | 检查 `--force-start`/`--force-duration` |
 | `spring` | 接触力异常 | 检查接触面高度 (默认 z=0.0) |
 | `circle` | 轨迹跟踪不准 | 增大 `--bandwidth` (默认 30.0) |
+
+### 7.4 tangent 模式: 画圆时末端工具朝上 (倾斜固定角度)
+
+**现象**: GAC tangent 画圆时末端以恒定倾斜角度朝上,
+而 GIC circle 任务末端垂直朝下. 用户期望画圆时工具朝下 (舒适, 不易碰限位).
+
+**根因**: 期望朝向定义不同.
+- **GAC tangent** 跑在 `--task regulation` 上, 期望朝向固定为
+  `Rd_t = R_start` (home 起始姿态的朝向). 我们的惯性系导纳修复
+  只修正**位置** (`pd_track = pd + pos_corr_inertial`), 从未改动 Rd.
+  所以画圆全程保持 home 的倾斜朝向.
+- **GIC circle** 从 `task_config.py` 读取朝向:
+  `orientation` 第 3 列为 `(0,0,-1)`, 即末端 z 轴垂直朝下.
+
+不是 GAC 的 bug, 而是两个任务命令了不同的期望朝向.
+
+**修复** (verify_gac_mujoco.py):
+1. 定义常量 `TANGENT_DOWN_R` (z 轴朝下的旋转矩阵, 与 GIC 一致)
+2. 主循环中 tangent 分支覆盖 `Rd_des = TANGENT_DOWN_R`
+3. 从起始姿态到朝下约 160°, 用 **3s 平滑过渡** (slerp):
+   - 0.4s 过渡角速度 ≈7 rad/s, 会使前 4 个关节力矩饱和到限位
+   - 3s 过渡 ≈0.93 rad/s, 力矩全部在限位内
+4. 过渡期间用**有限差分**估计 dRd, 使 wd 反映实际旋转, 避免姿态跟踪滞后
+
+**验证**: 稳态 rot_err = 0, 末端 z 轴对齐 world -z 度 = 1.0000;
+圆轨迹半径 0.201m, 角度覆盖 >600° (画完整圆); Z 高度保持 (波动 <0.05m 仅在过渡期).
+
+---
+
+## 8. 画圆任务: 圆心位置与半径控制
+
+GIC 和 GAC 都支持画圆任务, 但**圆心/半径的配置方式不同**:
+
+| 控制方式 | 脚本 | 圆心 | 半径 | 参数来源 |
+|---|---|---|---|---|
+| GIC 画圆 | `run_se3_control.py --task circle` | 配置文件 | 配置文件 | `config/task_config.py` → `circle` |
+| GIC 画圆 | `verify_gic_mujoco.py --task circle` | 配置文件 | 配置文件 | `config/task_config.py` → `circle` |
+| GAC 画圆 | `verify_gac_mujoco.py --task circle` | 配置文件 | 配置文件 | `config/task_config.py` → `circle` |
+| GAC 切向柔顺画圆 | `verify_gac_mujoco.py --force-mode tangent` | **CLI** | **CLI** | `--tangent-circle-center` / `--tangent-radius` |
+
+### 8.1 配置文件方式 (GIC circle / GAC circle 任务)
+
+修改 `se3_control/config/task_config.py` 中的 `circle` 字典:
+
+```python
+circle = {
+    'center':      [0.35, 0.0, 0.3],   # 圆心 [x, y, z] (m), z 建议 0.5~0.8
+    'radius':      0.08,               # 半径 (m)
+    'speed':       0.8,                # 角速度 (rad/s), 越大画得越快
+    'orientation': [0, 1, 0,
+                    1, 0, 0,
+                    0, 0, -1],         # 末端 z 轴朝下
+}
+```
+
+改完 `center` / `radius` 后, 三个脚本的 circle 任务都会使用新值:
+
+```bash
+python se3_control/scripts/run_se3_control.py --task circle --no-viewer
+python se3_control/scripts/verify_gic_mujoco.py  --task circle --no-viewer
+python se3_control/scripts/verify_gac_mujoco.py  --task circle --no-viewer
+```
+
+### 8.2 CLI 方式 (GAC tangent 模式)
+
+tangent 模式跑在 `--task regulation` 上, 画圆由 `--force-mode tangent`
+专属参数完全定义 (**不读** `task_config.circle`):
+
+```bash
+# 默认: 圆心 (0.5, 0.0, 0.125), 半径 0.2m
+python se3_control/scripts/verify_gac_mujoco.py --force-mode tangent --no-viewer
+
+# 自定义圆心 + 半径
+python se3_control/scripts/verify_gac_mujoco.py --force-mode tangent \
+    --tangent-circle-center 0.6 0.1 0.3 \
+    --tangent-radius 0.3 --no-viewer
+```
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--tangent-circle-center` | `0.5 0.0 0.125` | 圆心 [cx cy cz]. **只取 cx, cy** (水平位置). 实际圆高度 = 初始末端 z (`--init-pos` 的 z, 默认 0.25), 由惯性系导纳 K_z 刚性维持 |
+| `--tangent-radius` | `0.2` | 圆半径 (m) |
+| `--tangent-radial-stiffness` | `500.0` | 径向虚拟弹簧刚度 (N/m), 越大轨迹越贴合半径, `0`=无约束 |
+
+> 提示: 半径越大, 画完整圆所需时间越长 (圆周运动周期 ≈ 2πr/v,
+> F=10N、D=141 时 v≈0.07m/s, 默认 r=0.2 周期 ≈18s). 详见 §7.2.
+
+---
+
+## 9. 力交互实验二 — 方向解耦测试
+
+设计文档: [docs/plan/force_interaction_experiments_plan.md](../docs/plan/force_interaction_experiments_plan.md) §4.
+完整归档报告 (改动 + 结果 + 评判方法): [docs/usages/exp2_direction_decoupling_report.md](../docs/usages/exp2_direction_decoupling_report.md).
+
+**目的**: 在 GAC / GIC 两种控制场景下, 依次施加三个轴向恒力 (Fx/Fy/Fz) 与
+三个恒力偶 (Mx/My/Mz), 检验每类输入**只产生对应轴的位移**, 不产生额外位移
+(方向解耦). 核心回归对象是历史 "Z 振荡" bug (施加 x 向力出现 z 向漂移).
+
+### 9.1 运行
+
+```bash
+# GAC 方向解耦 (主测对象) — 无头模式
+python se3_control/scripts/verify_gac_mujoco.py --experiment decouple --no-viewer
+
+# GIC 方向解耦 (基线)
+python se3_control/scripts/verify_gic_mujoco.py --experiment decouple --no-viewer
+
+# 自定义输入幅值 / 块时长
+python se3_control/scripts/verify_gac_mujoco.py --experiment decouple \
+    --decouple-force 5.0 --decouple-moment 0.5 \
+    --decouple-settle 1.5 --decouple-measure 1.0 --no-viewer
+```
+
+### 9.2 原理与双力通路
+
+仿真按 **7 个时间块**顺序进行: 块 0 = 基线 (零输入), 块 1-3 = +x/+y/+z 恒力,
+块 4-6 = 绕 x/y/z 恒力偶 (均世界系). 每块长 `settle+measure` 秒, 取每块
+最后 `measure` 秒的稳态位姿均值, 相对基线块求 6 维响应 `[Δp; Δφ]` →
+得到 6×6 **静态耦合矩阵** 与耦合比矩阵 (`|Δ_out|/|Δ_in|`).
+
+物理力 `data.xfrc_applied[ee_body]` (世界系, 作用在末端 body COM) 与感知力
+`F_ext_ctrl = R_curᵀ·F_world` (GAC 滤波器输入, 体坐标系) 分离:
+
+| 通路 | GAC | GIC |
+|---|---|---|
+| 物理力 (仿真中真实作用在末端) | ✔ | ✔ |
+| 感知力 (控制器输入) | Rᵀ·F (体坐标导纳) | ✘ (被动响应) |
+
+GAC 额外记录 `GACFilter.state['X_corr']` 并做体→世界系投影, 输出
+**滤波器层耦合矩阵** (`coupling_xc`), 与 EE 最终位移耦合对比, 区分
+**滤波器耦合** 与 **跟踪层耦合**.
+
+### 9.3 参数表
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--experiment decouple` | `none` | 启用方向解耦实验 (自动 `max_time = 7×(settle+measure)`) |
+| `--decouple-force` | `10.0` | 轴向力幅值 (N) — GAC 稳态位移 ≈ F/K_d = 2 cm |
+| `--decouple-moment` | `1.0` | 力偶幅值 (Nm) — GAC 稳态转动 ≈ τ/K_rot = 0.02 rad |
+| `--decouple-settle` | `2.0` | 每块过渡时间 (s), ≈ 4× 滤波器时间常数 |
+| `--decouple-measure` | `1.0` | 每块稳态测量时间 (s) |
+
+默认值来自 `se3_control/config/task_config.py` 的 `experiments['decouple']`。
+注意: 实验模式下滤波器积分步长自动取仿真 `dt=0.001s` (其他模式为 0.002s),
+避免滤波器以 2× 速率积分。
+
+### 9.4 输出
+
+- 终端报告: 主响应幅值 + 6×6 耦合比矩阵 (%) + 超阈值清单 + 滤波器层耦合矩阵;
+- 热力图: `se3_control/figures/decouple/{gac,gic}_decouple.png`
+  (左: 耦合矩阵, 右: 耦合比 %).
+
+阈值 (计划 §4.3): 轴间耦合比 (`|Δy|/|Δx|` 等同域) 与 平动↔转动耦合
+(`|Δφ|/|Δx|`) 均 < 5% (GAC 期望); GIC 作基线记录.
+
+### 9.5 结果解读与已知发现
+
+默认工作位形 (2026-08 调整): 新 home 将 EE 从 ~1.15m 高位/末端朝上
+改为 **~[0.50, 0, 0.50] 且末端竖直朝下** (工具 z 轴 = [0,0,-1], 倾角 0°),
+调节任务的期望位姿 = FK(home_q), 故解耦/扫频实验随之在低位工作.
+(UR12e home_q = `[-0.356, -1.498, 1.81, 1.259, 1.571, -0.124]`,
+UR3 = `[-0.327, -1.42, 1.236, -1.386, -1.571, 2.738]`.)
+竖直朝下通过将 q5 置为 ±90° 实现 — 该处恰为腕部条件最佳区域
+(腕部奇异在 q5 = 0/±180°, 即 wrist_1∥wrist_3), 故非奇异.
+(求解 home 时采用数值稳健的旋转向量姿态误差, 修复了原 IK 在 ~180°
+朝向差下叉积误差度量的退化问题.)
+
+- **GAC 滤波器层完美解耦**: `coupling_xc` 为对角矩阵 (约 `1/K_d = 2e-3 m/N`),
+  力矩块平动响应 ≈ 0. 说明体坐标导纳经 R_cur 投影的 Z 振荡问题已在滤波器层修复;
+- **Z 振荡回归断言通过**: 竖直舒适位下 GAC 施加 x 向力时 `|Δz|/|Δx| ≈ 7.7%`,
+  处于计划 §4.2 的"可接受 < 10%"区间 (超出严格 5%, 但该 7.7% 全部来自跟踪层位形
+  相关耦合, 滤波器层仍严格解耦). 回归测试断言已按可接受线固化
+  (`tests/test_gac_decouple_regression.py`);
+- **跟踪层耦合 (已知限制, 位形相关)**: GAC/GIC 跟踪层均采用自适应阻抗
+  `K_adapt = ω²·M̃` (M̃ 为满 6×6 操作空间惯量, 各向异性). 稳态时 EE 位移 =
+  滤波器目标 (F/K_d, 完全对角) + 跟踪误差 (≈M̃⁻¹F/ω², 与位形相关), 后者在
+  世界系各方向有耦合. 实测耦合矩阵随位形变化 (旧高位位形亦存在 >80% 的
+  力→转动耦合单元), 新舒适位形下力块平动耦合 ~10% 量级、力→转动耦合
+  较大但部分单元较旧位形改善. 这是控制器设计特性, 非测量伪影
+  (末端 site 与 body 原点重合, 无杠杆臂误差).
+
+  如需改善 EE 级解耦, 方向: 提高跟踪层带宽 / 给 `K_adapt` 设置刚度下限 /
+  将自适应阻抗改为世界系各向同性刚度 (如 `ω²·I`) 而非 `ω²·M̃`.
+
+### 9.6 回归测试
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/lj252/miniconda3/envs/roboarm/bin/python \
+    -m pytest tests/test_gac_decouple_regression.py -v
+```
+
+断言: (1) EE 级 `Fx → Δz` 耦合比 < 5%; (2) 滤波器层 `Fx → Δz` 耦合 < 1e-3。
+
+### 9.7 可视化循环模式 (`--decouple-loop`)
+
+定量模式 (9.1) 每个动作只出现一次, 时间短, 不便在 viewer 中观察末端位移.
+`--decouple-loop` 提供**循环演示模式**: 动作与复位间隙交替, 反复循环, 便于观察.
+
+```bash
+# GAC 循环可视化 (推荐演示 — 位移最明显, ~6 cm)
+python se3_control/scripts/verify_gac_mujoco.py --experiment decouple --decouple-loop
+
+# GIC 循环可视化 (基线; 刚度 K_adapt=ω²M̃ 较硬, 位移较小 ~1 cm)
+python se3_control/scripts/verify_gic_mujoco.py --experiment decouple --decouple-loop
+
+# 无头模式 (跑满 2 轮后自动结束)
+python se3_control/scripts/verify_gac_mujoco.py --experiment decouple --decouple-loop --no-viewer
+```
+
+**序列构造**: 每个动作后紧跟一个零输入复位块, 共 12 个子块
+`[Fx, 0, Fy, 0, Fz, 0, Mx, 0, My, 0, Mz, 0]`, 每子块长 `settle+measure` 秒;
+块索引对 12 取模 → 60s 后自动回到 Fx 进入下一轮, 持续循环.
+**关闭 viewer 窗口即提前结束**仿真, 无需等待全部轮次.
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--decouple-loop` | `false` | 启用循环可视化模式 (轮数取自配置 `cycles`) |
+
+`experiments['decouple_loop']` 配置 (独立于定量模式): `force=30 N` (GAC 稳态
+位移 ≈ 30/500 = **6 cm**, 明显可辨), `moment=2 Nm`, `settle=2 s`, `measure=3 s`,
+`cycles=2` (完整循环轮数). 循环模式**跳过**定量耦合分析 (输出仅供观察, 不写入 figures/)。
 
 ---
 

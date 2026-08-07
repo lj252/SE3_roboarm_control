@@ -1,0 +1,322 @@
+[
+  {
+    "tc": 2.0,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 9682.737420488782,
+    "F_ss": 23.552551905501357,
+    "t_contact": 4.9030000000000005
+  },
+  {
+    "tc": 2.0,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 9680.253264781215,
+    "F_ss": 23.54880797720507,
+    "t_contact": 4.9030000000000005
+  },
+  {
+    "tc": 2.0,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 9676.664839332143,
+    "F_ss": 23.543353576750132,
+    "t_contact": 4.9030000000000005
+  },
+  {
+    "tc": 2.0,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 9671.480659699293,
+    "F_ss": 23.535328939469775,
+    "t_contact": 4.9030000000000005
+  },
+  {
+    "tc": 2.0,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 94670.12294393346,
+    "F_ss": 32.79558209895773,
+    "t_contact": 4.9030000000000005
+  },
+  {
+    "tc": 1.0,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 36474.8283192178,
+    "F_ss": 30.226364825719717,
+    "t_contact": 4.904
+  },
+  {
+    "tc": 1.0,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 36474.91178852048,
+    "F_ss": 30.224926619490667,
+    "t_contact": 4.904
+  },
+  {
+    "tc": 1.0,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 36475.00986660227,
+    "F_ss": 30.222757384366517,
+    "t_contact": 4.904
+  },
+  {
+    "tc": 1.0,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 36474.98412743354,
+    "F_ss": 30.219195031990452,
+    "t_contact": 4.904
+  },
+  {
+    "tc": 1.0,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 104730.73365332771,
+    "F_ss": 33.06515312007273,
+    "t_contact": 4.904
+  },
+  {
+    "tc": 0.5,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 81745.58434697207,
+    "F_ss": 32.02877957648755,
+    "t_contact": 4.905
+  },
+  {
+    "tc": 0.5,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 81745.65071381666,
+    "F_ss": 32.027608930096335,
+    "t_contact": 4.905
+  },
+  {
+    "tc": 0.5,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 81745.74940272355,
+    "F_ss": 32.025828079423256,
+    "t_contact": 4.905
+  },
+  {
+    "tc": 0.5,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 81745.91143935308,
+    "F_ss": 32.022795504002815,
+    "t_contact": 4.905
+  },
+  {
+    "tc": 0.5,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 149047.75180671798,
+    "F_ss": 33.024475789370484,
+    "t_contact": 4.905
+  },
+  {
+    "tc": 0.3,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 183872.1695955939,
+    "F_ss": 32.91289608443714,
+    "t_contact": 4.906
+  },
+  {
+    "tc": 0.3,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 183872.14823526752,
+    "F_ss": 32.91171958070477,
+    "t_contact": 4.906
+  },
+  {
+    "tc": 0.3,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 183872.11769667413,
+    "F_ss": 32.909928756684025,
+    "t_contact": 4.906
+  },
+  {
+    "tc": 0.3,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 183872.09910234538,
+    "F_ss": 32.90684631713401,
+    "t_contact": 4.906
+  },
+  {
+    "tc": 0.3,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 218364.31456210563,
+    "F_ss": 33.38561108429851,
+    "t_contact": 4.906
+  },
+  {
+    "tc": 0.2,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 377476.4472731231,
+    "F_ss": 33.30663805295633,
+    "t_contact": 4.907
+  },
+  {
+    "tc": 0.2,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 377476.6196839149,
+    "F_ss": 33.30535223309197,
+    "t_contact": 4.907
+  },
+  {
+    "tc": 0.2,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 377476.87593115715,
+    "F_ss": 33.303400183287025,
+    "t_contact": 4.907
+  },
+  {
+    "tc": 0.2,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 377477.3979071398,
+    "F_ss": 33.29999436787916,
+    "t_contact": 4.907
+  },
+  {
+    "tc": 0.2,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 369972.4500771404,
+    "F_ss": 33.913371359591345,
+    "t_contact": 4.908
+  },
+  {
+    "tc": 0.1,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 1257796.7380948362,
+    "F_ss": 33.63283293895929,
+    "t_contact": 4.917
+  },
+  {
+    "tc": 0.1,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 1257798.0365454461,
+    "F_ss": 33.63117099311877,
+    "t_contact": 4.917
+  },
+  {
+    "tc": 0.1,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 1257799.949304361,
+    "F_ss": 33.62867655976171,
+    "t_contact": 4.917
+  },
+  {
+    "tc": 0.1,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 1257803.3907552634,
+    "F_ss": 33.62420894918974,
+    "t_contact": 4.918
+  },
+  {
+    "tc": 0.1,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 811390.2549868269,
+    "F_ss": 33.968856147072316,
+    "t_contact": 4.92
+  },
+  {
+    "tc": 0.05,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 3693283.4916625307,
+    "F_ss": 33.81213131109548,
+    "t_contact": null
+  },
+  {
+    "tc": 0.05,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 3693288.1524261762,
+    "F_ss": 33.8100629799814,
+    "t_contact": null
+  },
+  {
+    "tc": 0.05,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 3693295.076035765,
+    "F_ss": 33.80698113583793,
+    "t_contact": null
+  },
+  {
+    "tc": 0.05,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 3693306.7845110577,
+    "F_ss": 33.801334962366816,
+    "t_contact": null
+  },
+  {
+    "tc": 0.05,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 1319717.608171253,
+    "F_ss": 34.058843798978856,
+    "t_contact": null
+  },
+  {
+    "tc": 0.02,
+    "tau_delay": 0.0,
+    "class": "stable",
+    "K_env_dyn": 11307679.710607547,
+    "F_ss": 34.00445546079593,
+    "t_contact": null
+  },
+  {
+    "tc": 0.02,
+    "tau_delay": 0.002,
+    "class": "stable",
+    "K_env_dyn": 11307691.59413541,
+    "F_ss": 34.002254325808686,
+    "t_contact": null
+  },
+  {
+    "tc": 0.02,
+    "tau_delay": 0.005,
+    "class": "stable",
+    "K_env_dyn": 11307709.330090044,
+    "F_ss": 33.99888402610651,
+    "t_contact": null
+  },
+  {
+    "tc": 0.02,
+    "tau_delay": 0.01,
+    "class": "stable",
+    "K_env_dyn": 11307739.093393415,
+    "F_ss": 33.991761891271416,
+    "t_contact": null
+  },
+  {
+    "tc": 0.02,
+    "tau_delay": 0.02,
+    "class": "limit_cycle",
+    "K_env_dyn": 3390445.735047389,
+    "F_ss": 34.35804334149152,
+    "t_contact": null
+  }
+]

@@ -1,7 +1,7 @@
 # GIC 控制核心移植计划 — Phase 2
 
 > 从 `verify_gic_mujoco.py` 中抽离 GIC 控制核心，形成机器人无关的独立库
-> 关联文档: [deploy_se3_to_hardware_plan.md](./deploy_se3_to_hardware_plan.md)
+> 关联文档: [deploy_se3_to_hardware_plan.md](../../../docs/deploy_se3_to_hardware_plan.md)
 
 ---
 

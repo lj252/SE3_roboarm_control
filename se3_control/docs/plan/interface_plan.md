@@ -1,6 +1,6 @@
 # Phase 1: RobotHWInterface — Hardware Abstraction Layer
 
-> 关联文档: [deploy_se3_to_hardware_plan.md](../deploy_se3_to_hardware_plan.md)
+> 关联文档: [deploy_se3_to_hardware_plan.md](../../../docs/deploy_se3_to_hardware_plan.md)
 > 首个部署目标: **UR12e**（使用 `ur_rtde`）
 
 ---
@@ -401,4 +401,4 @@ se3_control/
 ---
 
 *文档创建日期: 2026-07-26*
-*编写依据: [deploy_se3_to_hardware_plan.md](../deploy_se3_to_hardware_plan.md) Phase 1*
+*编写依据: [deploy_se3_to_hardware_plan.md](../../../docs/deploy_se3_to_hardware_plan.md) Phase 1*

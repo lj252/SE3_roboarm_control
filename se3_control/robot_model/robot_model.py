@@ -342,6 +342,28 @@ class RobotModel:
     # 4. 逆运动学（高斯-牛顿法）
     # ================================================================
 
+    @staticmethod
+    def _rotation_vector(R):
+        """SO(3) 旋转矩阵 → 旋转向量 (对数映射, 数值稳健).
+
+        :param R: ndarray (3,3) — 旋转矩阵
+        :returns: ndarray (3,) — 旋转向量 θ·k ∈ ℝ³ (θ∈[0, π])
+        """
+        # cos(θ) = (tr(R)-1)/2, 裁剪避免 arccos 域错误
+        tr = np.clip(0.5 * (np.trace(R) - 1.0), -1.0, 1.0)
+        th = np.arccos(tr)
+        if th < 1e-9:
+            return np.zeros(3)
+        # 轴 k: 通常由反对称部分提取; θ≈π 时反对称部分退化, 改由
+        # 对称部分 (R + I = 2kkᵀ) 的主特征向量求轴
+        if np.sin(th) > 1e-6:
+            K = (R - R.T) / (2.0 * np.sin(th))
+            ax = np.array([K[2, 1], K[0, 2], K[1, 0]])
+        else:
+            _, _, Vt = np.linalg.svd(R + np.eye(3))
+            ax = Vt[0]
+        return th * ax
+
     def gauss_newton_IK(self, pd, Rd, init_q,
                         step_size=0.5, tol=1e-3, max_cnt=200,
                         verbose=None):
@@ -399,12 +421,10 @@ class RobotModel:
         n_active = len(active_joints)
         use_subset = n_active < self.nv
 
-        # 初始误差
+        # 初始误差 (世界系: 位置差 + R 相对 Rd 的旋转向量)
         ep = (p - pd_vec).reshape((-1, 1))
-        R1, R2, R3 = R[:, 0], R[:, 1], R[:, 2]
-        Rd1, Rd2, Rd3 = Rd_arr[:, 0], Rd_arr[:, 1], Rd_arr[:, 2]
-        eR = -0.5 * (np.cross(R1, Rd1) + np.cross(R2, Rd2) + np.cross(R3, Rd3))
-        error = np.vstack((ep, eR.reshape((-1, 1))))
+        eR = self._rotation_vector(R @ Rd_arr.T).reshape((-1, 1))
+        error = np.vstack((ep, eR))
         err_norm = np.linalg.norm(error)
 
         step_cnt = 0
@@ -437,9 +457,8 @@ class RobotModel:
 
                 p_try, R_try = self.get_pose()
                 ep_try = (p_try - pd_vec).reshape((-1, 1))
-                R1, R2, R3 = R_try[:, 0], R_try[:, 1], R_try[:, 2]
-                eR_try = -0.5 * (np.cross(R1, Rd1) + np.cross(R2, Rd2) + np.cross(R3, Rd3))
-                err_try = np.linalg.norm(np.vstack((ep_try, eR_try.reshape((-1, 1)))))
+                eR_try = self._rotation_vector(R_try @ Rd_arr.T).reshape((-1, 1))
+                err_try = np.linalg.norm(np.vstack((ep_try, eR_try)))
 
                 if err_try < err_norm:
                     q = q_try

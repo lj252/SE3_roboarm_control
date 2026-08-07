@@ -38,7 +38,7 @@ SE(3) 几何导纳控制的 MuJoCo + Pinocchio 联合验证
   python se3_control/scripts/verify_gac_mujoco.py --task circle \
       --force-mode constant --force-amplitude 5 0 0 0 0 0 --no-viewer
 
-关联: verify_gac_mujoco_plan.md | GAC_plan.md
+关联: docs/plan/verify_gac_mujoco_plan.md | docs/plan/GAC_plan.md
 """
 
 import os
@@ -61,12 +61,28 @@ from robot_model.robot_model import RobotModel
 from core.gac_controller import GACController
 from core.se3_math import vee_map, hat_map, rotmat_slerp
 from core.trajectory import build_trajectory
+# 力交互实验分析库 (实验二: 方向解耦)
+from core.experiment_analysis import (build_decouple_inputs,
+                                      build_decouple_loop_inputs,
+                                      extract_decouple,
+                                      print_decouple_report,
+                                      plot_coupling_matrix)
 
 # 导入配置
 from config import task_config
 from config.robot_configs import get_robot_config
 
 URDF_DIR = os.path.join(PROJECT_DIR, 'urdf')
+
+# tangent 模式期望朝向: 末端 z 轴垂直朝下 (与 GIC circle 任务一致).
+# 列优先: 第 0 列 = EE x 轴 (world +y), 第 1 列 = EE y 轴 (world +x),
+# 第 2 列 = EE z 轴 (world -z). 水平面画圆时工具垂直朝下最舒适,
+# 腕关节保持中位, 不易碰限位. 详见 usages.md §7.
+TANGENT_DOWN_R = np.array([
+    [0.0, 1.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0],
+])
 
 
 # ====================================================================
@@ -195,8 +211,21 @@ def parse_urdf_kinematics(urdf_path, debug=False):
 def urdf_joints_to_mujoco_xml(urdf_path, ee_frame_name='tool0',
                                timestep=0.001, gravity=np.array([0, 0, -9.81]),
                                link_to_mesh=None, mesh_subdir='',
-                               debug=False):
-    """将 URDF 关节链转换为 MuJoCo XML 字符串."""
+                               debug=False,
+                               # ── 接触实验环境 (实验三刚性接触, 计划附录 A) ──
+                               # 默认 None/False → 与旧行为完全一致 (零接触几何)
+                               rigid_ball=None,   # (pos(3), radius) 或 (pos, r, friction) → 不添加为 None
+                               tool_tip=None,     # dict(length,radius,mass) 或 None → 不添加工具尖
+                               force_sensor=False):  # 末端 6 维力/力矩传感器 (需 tool_tip)
+    """将 URDF 关节链转换为 MuJoCo XML 字符串.
+
+    接触环境可选参数 (实验三, 计划附录 A §A.2-A.3):
+      - rigid_ball: 在 worldbody 加一个固定、重质、可碰撞的刚体球
+        (接触刚度经 solref 可扫, 用于标定 K_env / 失稳边界扫描);
+      - tool_tip:    在末端连杆加一个带质量的工具尖 body (可碰撞球,
+        半径≈1cm 单点接触; 质量模拟 FT 传感器前的工具惯量);
+      - force_sensor: 在 tool_tip body 上加 6 维力/力矩传感器.
+    """
     joints, links, _ = parse_urdf_kinematics(urdf_path, debug)
 
     tree = ET.parse(urdf_path)
@@ -300,6 +329,15 @@ def urdf_joints_to_mujoco_xml(urdf_path, ee_frame_name='tool0',
                  f'pos="0 0 5" dir="1.5 1 -2"/>')
     lines.append(f'{indent*2}<geom name="floor" pos="0 0 -0.5" '
                  f'size="2 2 0.5" type="plane" condim="1"/>')
+    if rigid_ball is not None:
+        ball_pos, ball_r = rigid_ball[0], rigid_ball[1]
+        ball_mu = float(rigid_ball[2]) if len(rigid_ball) > 2 else 0.8
+        bp = ' '.join(f'{float(v):.10f}' for v in np.asarray(ball_pos))
+        lines.append(
+            f'{indent*2}<geom name="rigid_ball" type="sphere" '
+            f'pos="{bp}" size="{float(ball_r):.10f}" '
+            f'friction="{ball_mu:.3f}" '
+            f'condim="3" contype="1" conaffinity="1"/>')
 
     if joints:
         root_body = joints[0]['parent']
@@ -437,6 +475,38 @@ def urdf_joints_to_mujoco_xml(urdf_path, ee_frame_name='tool0',
                             f'{inner_indent}<site name="end_effector" '
                             f'type="sphere" size="0.005" pos="0 0 0" '
                             f'rgba="1 0 0 1"/>')
+                        # 工具尖: 挂在末端连杆下方, 带质量的固定 body
+                        # (可碰撞球, 单点接触; 质量模拟 FT 传感器前的工具惯量,
+                        #  计划附录 A §A.3)
+                        if tool_tip is not None:
+                            tt_L = float(tool_tip['length'])
+                            tt_r = float(tool_tip['radius'])
+                            tt_m = float(tool_tip.get('mass', 0.05))
+                            tt_I = 0.4 * tt_m * tt_r * tt_r
+                            # 工具尖摩擦 (缺省 None → MuJoCo 默认 1.0; 与球摩擦
+                            # 组合为几何平均. 表面摩擦跟随需调低, 见实验阶段 1)
+                            tt_mu = tool_tip.get('friction', None)
+                            tt_fric = (f' friction="{float(tt_mu):.3f}"'
+                                       if tt_mu is not None else '')
+                            lines.append(
+                                f'{inner_indent}<body name="tool_tip" '
+                                f'pos="0 0 {tt_L:.10f}">')
+                            # 无 joint 的 body = 与父体刚性连接 (工具固定挂载)
+                            lines.append(
+                                f'{inner_indent*2}<inertial mass="{tt_m:.6f}" '
+                                f'pos="0 0 0" '
+                                f'fullinertia="{tt_I:.8f} {tt_I:.8f} '
+                                f'{tt_I:.8f} 0 0 0"/>')
+                            lines.append(
+                                f'{inner_indent*2}<geom name="tool_tip" '
+                                f'type="sphere" size="{tt_r:.6f}" '
+                                f'pos="0 0 0" contype="1" conaffinity="1" '
+                                f'rgba="0.2 0.8 0.2 1"{tt_fric}/>')
+                            lines.append(
+                                f'{inner_indent*2}<site name="tool_tip_site" '
+                                f'type="sphere" size="{tt_r:.6f}" '
+                                f'pos="0 0 0"/>')
+                            lines.append(f'{inner_indent}</body>')
                     lines.append(f'{outer_indent}</body>')
 
         add_body_chain(root_body)
@@ -449,6 +519,11 @@ def urdf_joints_to_mujoco_xml(urdf_path, ee_frame_name='tool0',
                      f'joint="{j["name"]}" gear="1" ctrllimited="false" '
                      f'ctrlrange="-1e6 1e6"/>')
     lines.append(f'{indent}</actuator>')
+    if force_sensor and tool_tip is not None:
+        lines.append(f'{indent}<sensor>')
+        lines.append(f'{indent*2}<force name="ee_force" site="tool_tip_site"/>')
+        lines.append(f'{indent*2}<torque name="ee_torque" site="tool_tip_site"/>')
+        lines.append(f'{indent}</sensor>')
     lines.append('</mujoco>')
     return '\n'.join(lines)
 
@@ -561,7 +636,12 @@ def run_verification(robot_urdf, task='regulation',
                      tangent_amplitude=10.0, tangent_radial_stiffness=500.0,
                      init_pos=None,
                      bandwidth=30.0, damping=1.0,
-                     verbose=True, stop_at_end=True, loop=False):
+                     verbose=True, stop_at_end=True, loop=False,
+                     # ── 力交互实验 (实验二: 方向解耦) ──
+                     experiment='none',
+                     decouple_force=10.0, decouple_moment=1.0,
+                     decouple_settle=2.0, decouple_measure=1.0,
+                     decouple_loop=False, decouple_cycles=2):
     """GAC 控制验证主循环.
 
     步骤:
@@ -617,10 +697,39 @@ def run_verification(robot_urdf, task='regulation',
                        verbose=verbose)
 
     if home_q is None:
-        home_q = np.array([0.0, -1.2, 0.5, -0.8, 0.3, 0.5])[:robot.nv]
+        # 默认舒适位形: 与 robot_configs 'ur12e' 的 home_q 一致
+        # (EE 在 [0.50, 0, 0.50], 末端竖直朝下, 避开腕部奇异)
+        home_q = np.array([-0.356, -1.498, 1.81, 1.259, 1.571, -0.124])[:robot.nv]
 
     # ── 3. 初始化状态与轨迹 ──
     dt = model.opt.timestep
+
+    # ── 实验配置 (方向解耦: 7 块 = 基线 + 6 输入;
+    #    --decouple-loop 可视化循环: 动作间插复位间隙, 序列循环) ──
+    # 末端 body id: 物理外力 (xfrc_applied) 作用点 (作用在其 COM)
+    ee_body_id = model.site_bodyid[0] if model.nsite > 0 else 0
+    decouple_inputs = None
+    if experiment == 'decouple':
+        if decouple_loop:
+            decouple_inputs = build_decouple_loop_inputs(
+                force=decouple_force, moment=decouple_moment)
+            decouple_block = decouple_settle + decouple_measure
+            decouple_total = (len(decouple_inputs) * decouple_block
+                              * decouple_cycles)
+            if max_time <= 5.0:
+                max_time = decouple_total
+                print(f"[GAC decouple-loop] Auto max_time = {max_time:.1f}s "
+                      f"({len(decouple_inputs)} 子块 × {decouple_block:.1f}s "
+                      f"× {decouple_cycles} 循环; 关闭 viewer 可提前停止)")
+        else:
+            decouple_inputs = build_decouple_inputs(force=decouple_force,
+                                                    moment=decouple_moment)
+            decouple_block = decouple_settle + decouple_measure
+            decouple_total = len(decouple_inputs) * decouple_block
+            if max_time <= 5.0:
+                max_time = decouple_total
+                print(f"[GAC decouple] Auto max_time = {max_time:.1f}s "
+                      f"({len(decouple_inputs)} blocks × {decouple_block:.1f}s)")
     T = int(max_time / dt)
 
     # 使用 core.trajectory 构建轨迹
@@ -683,13 +792,17 @@ def run_verification(robot_urdf, task='regulation',
             print(f"[IK] q_ik    = {np.round(q_ik, 4)}")
             print(f"[IK] pos_err = {np.linalg.norm(p_start - pd0):.6e}")
 
-    # ── 4. 朝向渐进混合 (动态任务) ──
-    BLEND_DURATION = 0.4
+    # ── 4. 朝向渐进混合 (动态任务 / tangent 模式从初始姿态过渡到朝下) ──
+    # tangent: 需从 home 朝向旋转约 160° 到"朝下". 0.4s 太猛 (≈7 rad/s)
+    # 会使前 4 个关节力矩饱和, 用 3.0s 平滑过渡 (≈0.93 rad/s).
+    BLEND_DURATION = 3.0 if force_mode == 'tangent' else 0.4
     is_dynamic_task = not is_regulation
-    if is_dynamic_task:
+    if is_dynamic_task or force_mode == 'tangent':
         _, R_home_ik = robot.get_pose()
         if verbose:
             Rd0_des = traj_funcs.Rd_t(0).ravel().reshape(3, 3)
+            if force_mode == 'tangent':
+                Rd0_des = TANGENT_DOWN_R  # tangent: 混合目标是朝下朝向
             init_rot_err = 0.5 * np.linalg.norm(
                 np.cross(R_home_ik[:, 0], Rd0_des[:, 0])
                 + np.cross(R_home_ik[:, 1], Rd0_des[:, 1])
@@ -758,6 +871,7 @@ def run_verification(robot_urdf, task='regulation',
         'q': np.zeros((T, nv)),
         'dq': np.zeros((T, nv)),
         'f_ext': np.zeros((T, 6)),
+        'x_corr': np.zeros((T, 6)),   # 导纳滤波器输出 X_corr (体坐标系)
     }
 
     # ── 8. Viewer ──
@@ -807,19 +921,40 @@ def run_verification(robot_urdf, task='regulation',
     for i in range(T):
         t = i * dt
 
+        # 关闭 viewer 立即停止仿真 (所有模式通用)
+        if viewer is not None and not viewer.is_running():
+            if verbose:
+                print(f"[Viewer] closed — stopping simulation early "
+                      f"(t={t:.1f}s).")
+            break
+
         # ── 期望轨迹 ──
         pd = traj_funcs.pd_t(t).ravel()
         Rd_des = traj_funcs.Rd_t(t).reshape((3, 3))
-        if is_dynamic_task and t < BLEND_DURATION:
+
+        # tangent 模式: 期望朝向强制为"朝下" (末端垂直向下, 与 GIC circle 一致),
+        # 位置仍由惯性系导纳修正, 朝向与位置解耦, 互不影响.
+        if force_mode == 'tangent':
+            Rd_des = TANGENT_DOWN_R
+
+        needs_orient_blend = is_dynamic_task or force_mode == 'tangent'
+        if needs_orient_blend and t < BLEND_DURATION:
             alpha = t / BLEND_DURATION
             Rd = rotmat_slerp(R_home_ik, Rd_des, alpha)
         else:
             Rd = Rd_des
-        blend_factor = min(1.0, t / BLEND_DURATION) if is_dynamic_task else 1.0
+        blend_factor = min(1.0, t / BLEND_DURATION) if needs_orient_blend else 1.0
         dpd = traj_funcs.dpd_t(t).ravel()
         dRd = traj_funcs.dRd_t(t).reshape((3, 3)) * blend_factor
         ddpd = traj_funcs.ddpd_t(t).ravel()
         ddRd = traj_funcs.ddRd_t(t).reshape((3, 3)) * blend_factor
+
+        # tangent 混合期间: 覆盖朝向是 slerp 插值, 无解析导数.
+        # 用有限差分估计 dRd, 使 wd 反映实际旋转, 避免混合期内姿态跟踪滞后.
+        if force_mode == 'tangent' and t < BLEND_DURATION:
+            alpha_p = min((t + dt) / BLEND_DURATION, 1.0)
+            Rd_p = rotmat_slerp(R_home_ik, Rd_des, alpha_p)
+            dRd = (Rd_p - Rd) / dt
 
         vd = Rd.T @ dpd.reshape((-1, 1))
         wd = vee_map(Rd.T @ dRd)
@@ -841,7 +976,23 @@ def run_verification(robot_urdf, task='regulation',
             p_ee, R_cur = robot.get_pose()
 
         # ── 计算 F_ext ──
-        if force_mode == 'zero':
+        if experiment == 'decouple':
+            # 方向解耦: 世界系恒力/力偶, 物理施加 + 感知回读 (双力通路)
+            k_block = int(t // decouple_block)
+            if decouple_loop:
+                k_block = k_block % len(decouple_inputs)   # 循环模式: 取模
+            elif k_block >= len(decouple_inputs):
+                k_block = len(decouple_inputs) - 1
+            F_world = decouple_inputs[k_block]
+            if model.nsite > 0:
+                data.xfrc_applied[ee_body_id, :] = F_world   # 物理力 (世界系, 末端 body COM)
+            F_ext_raw = F_world.copy()
+            # 感知力: 模拟腕部 FT 传感器回读 (世界系 → 体坐标系 Rᵀ·F),
+            # 与硬件部署 (部署计划 M3: FT 集成) 逐层映射一致
+            F_ext_ctrl = np.zeros(6)
+            F_ext_ctrl[:3] = R_cur.T @ F_world[:3]
+            F_ext_ctrl[3:] = R_cur.T @ F_world[3:]
+        elif force_mode == 'zero':
             F_ext_raw = ForceProfile.zero(t)
         elif force_mode == 'constant':
             F_ext_raw = ForceProfile.constant(t, force=force_amplitude)
@@ -884,8 +1035,11 @@ def run_verification(robot_urdf, task='regulation',
         else:
             F_ext_raw = np.zeros(6)
 
-        # ── 控制器外力 (tangent 模式用零避免体坐标系耦合) ──
-        F_ext_ctrl = F_ext_ctrl if force_mode == 'tangent' else F_ext_raw
+        # ── 控制器外力 (tangent 模式用零避免体坐标系耦合;
+        #    decouple 分支已在上面设置感知力 Rᵀ·F, 需保留) ──
+        F_ext_ctrl = (F_ext_ctrl if (force_mode == 'tangent'
+                                     or experiment == 'decouple')
+                      else F_ext_raw)
 
         # ── 惯性系轨迹修正 (tangent 模式: 叠加 pos_corr_inertial) ──
         if force_mode == 'tangent':
@@ -920,6 +1074,8 @@ def run_verification(robot_urdf, task='regulation',
         log['Rd'][i] = Rd
         log['tau'][i] = tau_cmd
         log['f_ext'][i] = F_ext_raw.ravel()
+        if experiment == 'decouple':
+            log['x_corr'][i] = controller.filter_state['X_corr']
 
         ep = site_p - pd
         eR = -0.5 * (np.cross(site_R[:, 0], Rd[:, 0])
@@ -1028,6 +1184,19 @@ def run_verification(robot_urdf, task='regulation',
         elif not loop_active:
             time.sleep(1)
         viewer.close()
+
+    # ── 11. 方向解耦实验分析 (循环模式为可视化, 跳过定量报告) ──
+    if experiment == 'decouple' and not decouple_loop:
+        try:
+            res = extract_decouple(log, decouple_settle, decouple_measure,
+                                   inputs=decouple_inputs, use_xc=True)
+            log['decouple'] = res
+            print_decouple_report(res, 'GAC')
+            save_path = os.path.join(PROJECT_DIR, 'figures', 'decouple',
+                                     'gac_decouple.png')
+            plot_coupling_matrix(res, 'GAC', save_path=save_path)
+        except Exception as e:
+            print(f"[GAC decouple] Analysis failed: {e}")
 
     return log, robot
 
@@ -1289,6 +1458,23 @@ if __name__ == '__main__':
     parser.add_argument('--damping', type=float, default=1.0,
                         help='GAC inner tracking damping ratio')
 
+    # ── 力交互实验 (实验二: 方向解耦) ──
+    parser.add_argument('--experiment', type=str, default='none',
+                        choices=['none', 'decouple'],
+                        help='External force experiment '
+                             '(decouple = 方向解耦, 7 块: 基线+6 输入)')
+    parser.add_argument('--decouple-force', type=float, default=None,
+                        help='解耦实验轴向力幅值 (N), 默认 10.0')
+    parser.add_argument('--decouple-moment', type=float, default=None,
+                        help='解耦实验力偶幅值 (Nm), 默认 1.0')
+    parser.add_argument('--decouple-settle', type=float, default=None,
+                        help='每块过渡时间 (s), 默认 2.0')
+    parser.add_argument('--decouple-measure', type=float, default=None,
+                        help='每块稳态测量时间 (s), 默认 1.0')
+    parser.add_argument('--decouple-loop', action='store_true',
+                        help='可视化循环模式: 动作间插复位间隙, 序列循环运行 '
+                             '(幅值/时长取 experiments.decouple_loop 配置)')
+
     args = parser.parse_args()
 
     if args.D_d is not None:
@@ -1297,6 +1483,23 @@ if __name__ == '__main__':
         # 临界阻尼
         D_d_user = [2 * np.sqrt(args.K_d[i] * args.M_d[i])
                     for i in range(6)]
+
+    # 实验参数默认值 (来自 task_config.experiments;
+    #   --decouple-loop 时取 decouple_loop 段: 更大位移/更长时长)
+    _dec_cfg = (task_config.experiments.get('decouple_loop', {})
+                if args.decouple_loop
+                else task_config.experiments.get('decouple', {}))
+    decouple_force = (args.decouple_force if args.decouple_force is not None
+                      else _dec_cfg.get('force', 10.0))
+    decouple_moment = (args.decouple_moment if args.decouple_moment is not None
+                       else _dec_cfg.get('moment', 1.0))
+    decouple_settle = (args.decouple_settle if args.decouple_settle is not None
+                       else _dec_cfg.get('settle', 2.0))
+    decouple_measure = (args.decouple_measure
+                        if args.decouple_measure is not None
+                        else _dec_cfg.get('measure', 1.0))
+    decouple_loop = args.decouple_loop
+    decouple_cycles = _dec_cfg.get('cycles', 2)
 
     # 选择 URDF
     if args.robot in ('ur12e', 'ur3'):
@@ -1357,7 +1560,10 @@ if __name__ == '__main__':
         mesh_subdir=mesh_subdir,
         torque_limits=torque_limits,
         # GAC 参数
-        M_d=args.M_d, D_d=D_d_user, K_d=args.K_d, dt_filter=0.002,
+        # 实验模式下 dt_filter 与控制循环同步 (sim dt=0.001),
+        # 否则滤波器以 2× 速率积分, 频响/暂态与设计不符.
+        M_d=args.M_d, D_d=D_d_user, K_d=args.K_d,
+        dt_filter=(0.001 if args.experiment != 'none' else 0.002),
         force_mode=args.force_mode,
         force_amplitude=args.force_amplitude,
         force_start=args.force_start,
@@ -1371,6 +1577,11 @@ if __name__ == '__main__':
         verbose=True,
         stop_at_end=not args.no_stop,
         loop=do_loop,
+        # 力交互实验 (实验二)
+        experiment=args.experiment,
+        decouple_force=decouple_force, decouple_moment=decouple_moment,
+        decouple_settle=decouple_settle, decouple_measure=decouple_measure,
+        decouple_loop=decouple_loop, decouple_cycles=decouple_cycles,
     )
 
     # 绘图

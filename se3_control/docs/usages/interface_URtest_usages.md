@@ -1,6 +1,6 @@
 # RobotHWInterface 实机测试说明
 
-> 关联文档: [interface_plan.md](./interface_plan.md) | [deploy_se3_to_hardware_plan.md](../../docs/deploy_se3_to_hardware_plan.md)
+> 关联文档: [interface_plan.md](../plan/interface_plan.md) | [deploy_se3_to_hardware_plan.md](../../../docs/deploy_se3_to_hardware_plan.md)
 > 测试目标: UR12e / UR3 | 驱动库: ur_rtde
 >
 > **新功能**: 所有脚本支持 ``--robot ur12e|ur3`` 参数，自动切换配置。

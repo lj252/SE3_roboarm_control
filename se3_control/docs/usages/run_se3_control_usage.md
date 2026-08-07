@@ -1,6 +1,6 @@
 # run_se3_control.py — SE(3) GIC 控制仿真入口
 
-> 关联文档: [GIC_plan.md](./GIC_plan.md) | [deploy_se3_to_hardware_plan.md](../../docs/deploy_se3_to_hardware_plan.md)
+> 关联文档: [GIC_plan.md](../plan/GIC_plan.md) | [deploy_se3_to_hardware_plan.md](../../../docs/deploy_se3_to_hardware_plan.md)
 > 依赖核心模块: `core/se3_math.py`, `core/trajectory.py`, `core/gic_controller.py`
 
 ---
@@ -247,13 +247,13 @@ simulation = {
 
 | 文件 | 说明 |
 |---|---|
-| [run_se3_control.py](../scripts/run_se3_control.py) | 主程序 |
-| [core/se3_math.py](../core/se3_math.py) | SE(3) 数学工具 |
-| [core/trajectory.py](../core/trajectory.py) | 轨迹生成 |
-| [core/gic_controller.py](../core/gic_controller.py) | GIC 控制律 |
-| [config/task_config.py](../config/task_config.py) | 任务参数 |
-| [config/robot_configs.py](../config/robot_configs.py) | 机器人参数 |
-| [GIC_plan.md](./GIC_plan.md) | 核心移植计划 |
+| [run_se3_control.py](../../scripts/run_se3_control.py) | 主程序 |
+| [core/se3_math.py](../../core/se3_math.py) | SE(3) 数学工具 |
+| [core/trajectory.py](../../core/trajectory.py) | 轨迹生成 |
+| [core/gic_controller.py](../../core/gic_controller.py) | GIC 控制律 |
+| [config/task_config.py](../../config/task_config.py) | 任务参数 |
+| [config/robot_configs.py](../../config/robot_configs.py) | 机器人参数 |
+| [GIC_plan.md](../plan/GIC_plan.md) | 核心移植计划 |
 
 ---
 
