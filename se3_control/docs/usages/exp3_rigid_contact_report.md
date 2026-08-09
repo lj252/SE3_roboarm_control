@@ -416,19 +416,71 @@ python se3_control/scripts/verify_gac_contact.py --sweep --no-viewer
 
 # 摩擦场景加硬找失稳边界（复现 §6.4 的 ✗ 点）
 python se3_control/scripts/verify_gac_contact.py --no-viewer --ball-solref 0.2 1.0
+
+# ---- 实机运行示例（UR12e / UR3）----
+# 实机球位/球径与仿真不同时必须显式给出：
+python se3_control/scripts/verify_gac_contact.py --no-viewer \
+    --ball-pos 0.55 0.0 0.32 --ball-radius 0.075 \
+    --tool-length 0.12 --tool-mass 0.3 \
+    --ball-friction 0.5 --tool-friction 0.5 \
+    --tau-delay 0.004
+# UR3（同一命令换机器人）
+python se3_control/scripts/verify_gac_contact.py --robot ur3 --no-viewer \
+    --ball-pos 0.45 0.0 0.25 --ball-radius 0.075 \
+    --tool-length 0.10 --tool-mass 0.2 --tau-delay 0.004
+# 实机标定真实接触刚度（球刚度未知时从软档起步再逐步加硬）
+python se3_control/scripts/verify_gac_contact.py --sweep --no-viewer \
+    --sweep-solref 0.5 0.3 0.2 0.1 --sweep-delay 0.0 0.004 0.008 0.012 0.020
 ```
 
-主要参数（阶段 2 特有，其余同 §4.3）:
+**完整可调参数表**（阶段 2 = 阶段 1 全部接触参数 + GAC 特有参数，全部列出）：
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--K-d` | `5000 5000 5000 200 200 200` | 导纳滤波器刚度（平移 N/m，转动 N·m/rad） |
-| `--M-d` | `10 10 10 1 1 1` | 导纳滤波器虚拟质量 |
-| `--D-d` | None（临界阻尼） | 导纳滤波器阻尼（可重阻尼增稳） |
-| `--tau-delay` | `0.0` | FT 传感器延迟 τ_delay (s)，实机必填实测值 |
-| `--max-correction` | `0.1` | 滤波器修正量限幅 (m)，防饱和发散 |
-| `--sweep` | off | 稳定域扫描模式（替代单次运行） |
-| `--sweep-solref` / `--sweep-delay` / `--sweep-hold` | 见 §6.3 | 扫描网格 |
+| `--robot` | `ur12e` | `ur12e` / `ur3` |
+| `--ball-radius` | `0.12` | 球半径 (m)。**实机球大小不同必改** |
+| `--ball-pos` | `None` | 球心 `[x y z]`。默认按 home 位工具正下方自动计算（`tip + 工具轴·(0.02+δ+R_球+R_尖)`）；**实机球高度/位置不同必显式给出** |
+| `--tool-length` | `0.10` | 工具尖长度 (m)，实机探针长度必改 |
+| `--tool-radius` | `0.01` | 工具尖半径 (m) |
+| `--tool-mass` | `0.05` | 工具尖质量 (kg)。GAC 导纳观测的正是"工具+负载"力平衡，实机按真实夹具质量改 |
+| `--wrist-armature` | `0.1` | 腕部 dof_armature (kg·m²)。MuJoCo 特有，实机不需要 |
+| `--ball-friction` / `--tool-friction` | `0.15` | 球/尖摩擦系数（复合 `μ=sqrt(μ₁μ₂)`），实机按材质改 |
+| `--ball-solref` | `[1.0,1.0]` | MuJoCo 接触求解器时间常数 = **动态接触刚度标尺**（tc↓ → K_env_dyn↑；§3.1 标尺）。实机无此概念，对应真实球刚度 |
+| `--delta-pen` | `0.008` | 目标压深 (m)，实机等效设定力 `F≈K_env·pen` |
+| `--approach-speed` | `0.006` | 逼近速度 (m/s)，实机保持慢速 |
+| `--settle-time` | `1.2` | 接触建立保持时间 (s) |
+| `--theta-amp` | `0.12` | 摩擦斑经向半宽 (rad)。**GAC 关键**：0.12 > GIC 被动上限 0.08，靠力反馈突破面积上限 |
+| `--phi-amp` | `0.8` | 方位角 φ 摆动幅值 (rad, ±) |
+| `--rub-cycles` / `--phi-cycles` | `2` / `3` | θ/φ 维往返次数（不同频 → 填充面积） |
+| `--rub-mode` | `lissajous` | `lissajous`（稳定，默认）\| `cap`（球冠螺旋） |
+| `--rub-duration` | `16.0` | 摩擦段时长 (s)。**实机提醒**：加速测试须同步降速，否则切向过快伪失稳 |
+| `--depart-speed` | `0.05` | 抬离速度 (m/s) |
+| `--bandwidth` | `90.0` | GAC 内环期望带宽 ω_des (rad/s)，与阶段 1 稳定配方一致 |
+| `--damping` | `4.0` | GAC 内环期望阻尼比 ζ |
+| `--M-d` | `[10,10,10,1,1,1]` | 导纳虚拟质量（平动 kg / 转动 kg·m²） |
+| `--D-d` | `None` | 导纳虚拟阻尼（None = 按 K_d/M_d 临界阻尼；可重阻尼增稳） |
+| `--K-d` | `[5000,5000,5000,200,200,200]` | 导纳虚拟刚度：平动 5000 N/m（接触"手感"）、转动 200 Nm/rad |
+| `--max-correction` | `0.1` | 导纳滤波器最大修正量 (m/rad)（安全限幅，防碰撞超调） |
+| `--tau-delay` | `0.0` | **FT 传感器传输延迟 (s)**：0=理想零延迟（仿真基线）；实机按传感器手册/实测填（UR 外部 FT 一般 1–4 ms） |
+| `--sweep` | `False` | 稳定域扫描模式（扫 K_env × τ_delay，替代单次运行） |
+| `--sweep-solref` | `[2.0,1.0,0.5,0.3,0.2,0.1,0.05,0.02]` | 球 solref 序列（tc↓ → 动态 K_env↑，9.7 kN/m → 11.3 MN/m） |
+| `--sweep-delay` | `[0.0,0.002,0.005,0.010,0.020]` | FT 延迟序列 (s)。实机场景常用上限 10 ms |
+| `--sweep-hold` | `3.0` | 扫描点 S1 接触保持时长 (s) |
+| `--no-viewer` | `False` | 无头模式（SSH/服务器） |
+| `--save-dir` | `figures/contact/` | 输出目录 |
+
+> **实机适配清单（阶段 2）**：
+> ① 必改几何：`--ball-pos`（真实球心坐标）、`--ball-radius`（真实球半径）、
+> `--tool-length`/`--tool-mass`（真实工具）。
+> ② `--tau-delay` 按真实 FT 传感器延迟填（0 只是仿真基线）——仿真结论
+> **τ_delay ≲ 10 ms 全 K_env 稳定**，20 ms 全极限环，实机传感器 1–4 ms 落在安全区，
+> 但必须在实机用 `--sweep` 重扫真实延迟边界。
+> ③ `--M-d/--D-d/--K-d` 决定"接触手感"与失稳增益比 `K_env/K_d`；实机球刚度未知时
+> 先按 `--ball-solref 0.3`（≈184 kN/m）的保守档起步，再逐步加硬。
+> ④ 力反馈工作点必须落在硬化拐点右侧（压深 ≳ 0.5 mm），否则近零压深下
+> `K_env→810 kN/m` 使 `K_env/K_d` 增益爆炸（bang-bang 接触弹跳极限环）。
+> ⑤ `solref`/`solimp`/`armature` 是 MuJoCo 调试杠杆，实机无此概念，需用
+> Phase 0 标定在实机上重标等效 K_env。
 
 产物: `gac_contact.png`（5 联时序）、`gac_contact_rub.png`、`gac_contact_surface.png`
 （3D）、`gac_contact_stability.png`（稳定域图）+ `gac_contact_stability.json`（原始数据）。

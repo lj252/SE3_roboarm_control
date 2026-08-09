@@ -164,7 +164,8 @@ Franka 上无需改动即可运行。
 │  │ run_se3_control.py        仿真主入口（GIC 常规任务）              │ │
 │  │ verify_gic_mujoco.py      GIC 验证（任务 + 方向解耦实验）          │ │
 │  │ verify_gac_mujoco.py      GAC 验证（5 种力模式 + 方向解耦）        │ │
-│  │ verify_gic_contact.py     实验三：GIC 被动接触全流程               │ │
+│  │ verify_gic_contact.py     实验三阶段1：GIC 被动接触全流程          │ │
+│  │ verify_gac_contact.py     实验三阶段2：GAC 压入 + 稳定域扫描        │ │
 │  │ verify_contact_calibration.py  Phase 0：接触模型标定              │ │
 │  └──────────────────────────────────────────────────────────────────┘ │
 │                              │ 调用                                     │
@@ -275,7 +276,8 @@ SE3_roboarm_control/
 | `run_se3_control.py` | 仿真主入口：URDF→XML、MuJoCo 步进、可视化、记录。跑 regulation/circle/line 常规任务 | `--task --max-time --save-plot --cross-validate` |
 | `verify_gic_mujoco.py` | GIC 完整验证：常规任务 + `--experiment decouple` 方向解耦 | `--experiment --decouple-*` |
 | `verify_gac_mujoco.py` | GAC 验证：5 种外力模式（zero/constant/pulse/spring/tangent）+ 方向解耦 | `--force-mode --force-amplitude --M-d --D-d --K-d` |
-| `verify_gic_contact.py` | 实验三：GIC 被动接触（逼近/接触/摩擦/离开） | `--ball-* --delta-pen --theta-amp --phi-amp --bandwidth --damping` |
+| `verify_gic_contact.py` | 实验三阶段 1：GIC 被动接触（逼近/接触/摩擦/离开） | `--ball-* --delta-pen --theta-amp --phi-amp --bandwidth --damping` |
+| `verify_gac_contact.py` | 实验三阶段 2：GAC 压入（Fe_raw 力反馈）+ K_env×τ_delay 稳定域扫描 | `--ball-pos --K-d --M-d --tau-delay --theta-amp --sweep` |
 | `verify_contact_calibration.py` | Phase 0：接触模型标定（静态刚度 + 动态冲击） | `--solref-times --approach-speeds --press-pen` |
 
 完整参数表见 §8。`scripts/usages.md` 还保留了逐脚本的详细参数说明，两者可配合使用。
@@ -310,7 +312,7 @@ verification（验证）**”分层。
 | 文档 | 作用 |
 |---|---|
 | `exp2_direction_decoupling_report.md` | **实验二（方向解耦）归档报告**：默认位形调整（末端竖直朝下）、IK 修复、GAC/GIC 实测耦合矩阵、回归阈值 10% |
-| `exp3_rigid_contact_report.md` | **实验三（GIC 被动接触）报告**：solref→接触刚度、ω=90/ζ=4 的 2D 摩擦参数 |
+| `exp3_rigid_contact_report.md` | **实验三报告**：阶段 1 GIC 被动接触（solref→接触刚度、ω=90/ζ=4 的 2D 摩擦参数）+ 阶段 2 GAC 压入（Fe_raw 力反馈、K_env×τ_delay 稳定域、摩擦面积突破 1.95 cm²）+ 全参数表与实机适配说明 |
 | `interface_URtest_usages.md` | 硬件接口在 UR 实机上的测试用法 |
 | `robot_model_usages.md` | Pinocchio RobotModel 封装的使用说明 |
 | `run_se3_control_usage.md` | run_se3_control.py 的使用说明 |
@@ -336,7 +338,7 @@ verification（验证）**”分层。
 | Phase 0 | 接触模型标定（静态刚度 + 动态冲击） | 环境 | ✅ 已实现 |
 | ① | 正弦扫频（频率响应 / 带宽） | GAC 主测 / GIC 同测 | ⏳ 仅设计（未实现脚本） |
 | ② | 方向解耦（耦合矩阵） | GAC 主测 / GIC 基线 | ✅ 已实现 |
-| ③ | 刚性接触（GIC 被动接触全流程） | GIC 主测 | ✅ 已实现 |
+| ③ | 刚性接触（GIC 被动接触 + **GAC 压入**） | GIC 基线 / **GAC 主测** | ✅ 已实现 |
 | ④ | 负载突变（鲁棒性） | GAC / GIC 同测 | ⏳ 仅设计（未实现脚本） |
 | — | GAC 力模式实验（5 种外力） | GAC | ✅ 已实现 |
 
@@ -434,6 +436,13 @@ make-break=1、调节时间 <1s；摩擦段接触力波动 <10% F_ss、径向不
 
 **已知限制**：`θ_amp` 有上限（过大接触几何改变大，摩擦不稳定）；`mj_forward`
 静态接触力 ≠ `mj_step` 动态接触力（近零压深 ~6 MN/m）；重力预载 63 N。
+
+**阶段 2 — GAC 压入（`verify_gac_contact.py`，2026-08-07 完成）**：在 GIC 被动基线之上
+接入 `Fe_raw` 力反馈（位置内环 + 力外环 + FT 延迟，经典失稳结构）。两处成果：
+① 力反馈突破 GIC 被动摩擦面积上限——`θ_amp=0.12` 下斑块 **1.95 cm²**（GIC 被动 0.87 cm²），
+F_cv=7.3% 全程不脱离；② 扫 K_env × τ_delay 出硬件安全区间——**τ_delay ≲ 10 ms 全 K_env
+稳定**（K_env_dyn 9.7 kN/m → 11.3 MN/m），20 ms 全极限环；摩擦场景失稳边界在
+**K_env_dyn ≈ 184–377 kN/m**。启动命令与全部可调参数见 §8.6。
 
 ### 7.5 实验四 — 负载突变（仅设计，未实现）
 
@@ -537,45 +546,55 @@ python scripts/verify_gac_mujoco.py --experiment decouple --no-viewer
 | `--bandwidth` / `--damping` | `30.0` / `1.0` | 内环跟踪参数（同 GIC） |
 | `--experiment` / `--decouple-*` | 同 §8.2 | 方向解耦实验 |
 
-### 8.4 实验三：GIC 被动接触（`verify_gic_contact.py`）
+### 8.4 实验三阶段 1：GIC 被动接触（`verify_gic_contact.py`）
 
 ```bash
 # 默认全流程（UR12e）
-python scripts/verify_gic_contact.py
+python se3_control/scripts/verify_gic_contact.py
 # UR3
-python scripts/verify_gic_contact.py --robot ur3
+python se3_control/scripts/verify_gic_contact.py --robot ur3
 # 更快逼近 + 更浅压入 + 3 个来回
-python scripts/verify_gic_contact.py --approach-speed 0.08 --delta-pen 0.004 --rub-cycles 3 --no-viewer
+python se3_control/scripts/verify_gic_contact.py --approach-speed 0.08 --delta-pen 0.004 --rub-cycles 3 --no-viewer
 # 扩大表面摩擦面积: 增大 θ/φ 幅值 (2D 球面 Lissajous)
-python scripts/verify_gic_contact.py --theta-amp 0.10 --phi-amp 1.5708 --no-viewer
+python se3_control/scripts/verify_gic_contact.py --theta-amp 0.10 --phi-amp 1.5708 --no-viewer
+# 实机球位覆盖: 球心/半径与仿真不同时必须显式给出
+python se3_control/scripts/verify_gic_contact.py --ball-pos 0.55 0.0 0.32 --ball-radius 0.075 --no-viewer
 ```
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--ball-radius` | `0.12` | 刚体球半径 (m) |
-| `--ball-pos` | `None` | 球心位置 `[x y z]` |
-| `--tool-length` | `0.10` | 工具尖长度 (m) |
+| `--robot` | `ur12e` | `ur12e` / `ur3` |
+| `--ball-radius` | `0.12` | 刚体球半径 (m)。**实机球大小不同必改** |
+| `--ball-pos` | `None` | 球心位置 `[x y z]` (m)。默认按 home 位工具正下方自动计算（`tip + 工具轴·(0.02+δ_pen+R_球+R_尖)`）；**实机球高度/位置不同必显式给出** |
+| `--tool-length` | `0.10` | 工具尖长度 (m)（EE 到尖端的实际长度，实机探针长度不同必改） |
 | `--tool-radius` | `0.01` | 工具尖半径 (m) |
-| `--tool-mass` | `0.05` | 工具尖质量 (kg) |
-| `--wrist-armature` | `0.1` | 腕部电机转子惯量补偿 (dof_armature) |
-| `--ball-friction` / `--tool-friction` | `0.15` | 接触摩擦系数（复合 `μ=sqrt(μ₁μ₂)`） |
-| `--ball-solref` | `[1.0,1.0]` | MuJoCo 接触求解器时间常数 |
-| `--delta-pen` | `0.008` | 最大压深 (m) |
-| `--approach-speed` | `0.006` | 逼近速度 (m/s) |
+| `--tool-mass` | `0.05` | 工具尖质量 (kg)（模拟 FT 传感器前的工具惯量，实机按真实夹具质量改） |
+| `--wrist-armature` | `0.1` | 腕部电机转子惯量补偿 (dof_armature, kg·m²)。MuJoCo 特有（修正 URDF 缺腕部惯量），实机不需要 |
+| `--ball-friction` / `--tool-friction` | `0.15` | 球/尖摩擦系数（复合 `μ=sqrt(μ₁μ₂)`）。实机按球面材质改，如钢球橡胶头常用 ~0.5 |
+| `--ball-solref` | `[1.0,1.0]` | MuJoCo 接触求解器时间常数，**动态接触刚度标尺**（仿真调试用；实机无此概念，对应的是真实球刚度） |
+| `--ball-solimp-width` | `None` | 球 solimp[2] 宽度（近零压深硬化拐点宽度，仿真调试用，实机无效） |
+| `--delta-pen` | `0.008` | 目标压深 (m)。实机等效于设定接触力：`F ≈ K_env·pen`，要更轻/更重接触力就改它 |
+| `--approach-speed` | `0.006` | 逼近速度 (m/s)。实机建议保持慢速（冲击超调小） |
 | `--settle-time` | `1.2` | 接触建立保持时间 (s) |
-| `--theta-amp` | `0.08` | 极角 θ 摆动幅值 (rad) |
-| `--phi-amp` | `0.8` | 方位角 φ 摆动幅值 (rad) |
-| `--rub-cycles` | `2` | 摩擦来回次数 |
-| `--phi-cycles` | `3` | φ 维振荡周期数 |
-| `--rub-mode` | `lissajous` | 摩擦模式 |
-| `--rub-duration` | `16.0` | 摩擦段时长 (s) |
+| `--theta-amp` | `0.08` | 极角 θ 摆动幅值 (rad) = 摩擦斑经向半宽。GIC 被动上限 ~0.10（更大需 GAC，见 §8.6） |
+| `--phi-amp` | `0.8` | 方位角 φ 摆动幅值 (rad, ±)。`0` = 1D 弧线 |
+| `--rub-cycles` | `2` | 摩擦 θ（经向）往返次数 |
+| `--phi-cycles` | `3` | 摩擦 φ（纬向）往返次数（与 θ 不同频 → 填充面积） |
+| `--rub-mode` | `lissajous` | 摩擦模式：`lissajous`（稳定，默认）\| `cap`（球冠螺旋，面积大但 F_cv 偏高） |
+| `--rub-duration` | `16.0` | 摩擦段时长 (s)。**实机提醒**：加速测试须同步降速，否则切向速度过高会伪失稳 |
 | `--depart-speed` | `0.05` | 抬离速度 (m/s) |
-| `--bandwidth` | `90.0` | GIC 带宽 ω |
-| `--damping` | `4.0` | GIC 阻尼比 ζ |
+| `--bandwidth` | `90.0` | GIC 期望带宽 ω (rad/s)。2D 摩擦稳定域需要高带宽 |
+| `--damping` | `4.0` | GIC 期望阻尼比 ζ。2D 摩擦稳定域需要高阻尼 |
+| `--no-viewer` | `False` | 无头模式（SSH/服务器） |
 | `--save-dir` | `figures/contact/` | 输出图目录 |
 
 产物：控制台指标报告 + `figures/contact/` 下的 `gic_contact.png`（四阶段时间序列）、
 `gic_contact_rub.png`（摩擦斑俯视）、`gic_contact_surface.png`（球面接触轨迹 3D）。
+
+> **实机适配要点**：球位/球径/工具几何三项必改——`--ball-pos`（真实球心坐标）、
+> `--ball-radius`（真实球半径）、`--tool-length`/`--tool-mass`（真实工具）。摩擦系数
+> 按球面材质设。`solref`/`solimp`/`armature` 是 MuJoCo 调试杠杆，实机对应真实接触刚度，
+> 需用接触标定（Phase 0）在实机上重新标定等效 K_env。
 
 ### 8.5 Phase 0：接触标定（`verify_contact_calibration.py`）
 
@@ -602,6 +621,75 @@ python scripts/verify_contact_calibration.py --solref-times 0.02 0.005 0.002
 
 产物：控制台标定报告 + `calibration_partA.png`（F vs 压深）、`calibration_partB.png`
 （冲击时间序列）。
+
+---
+
+### 8.6 实验三阶段 2：GAC 压入（`verify_gac_contact.py`）
+
+阶段 2 在阶段 1 的 GIC 被动基线上接入 `Fe_raw` 力反馈（末端 FT 传感器 → 体坐标系 →
+`τ_delay` 延迟线 → GAC 导纳滤波器），用 GAC 主动压入 + 主动摩擦扩大接触斑。
+
+```bash
+# 默认全流程（UR12e）: GIC 被动基线 + GAC 力反馈摩擦（θ_amp=0.12，斑块 ~1.95 cm²）
+python se3_control/scripts/verify_gac_contact.py
+# UR3
+python se3_control/scripts/verify_gac_contact.py --robot ur3
+# 实机球位/球径覆盖（球心与仿真不同必须显式给出）
+python se3_control/scripts/verify_gac_contact.py --ball-pos 0.55 0.0 0.32 --ball-radius 0.075 --no-viewer
+# 稳定域扫描: 扫 K_env × τ_delay → 出硬件安全区间（默认 8 刚度 × 5 延迟）
+python se3_control/scripts/verify_gac_contact.py --sweep --no-viewer
+# 自定义扫描窗口（示例: 更硬刚度的球面 + 更长延迟上限）
+python se3_control/scripts/verify_gac_contact.py --sweep \
+    --sweep-solref 0.5 0.2 0.1 0.05 0.02 --sweep-delay 0.0 0.005 0.010 0.015 0.020 0.030 \
+    --no-viewer
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--robot` | `ur12e` | `ur12e` / `ur3` |
+| `--ball-radius` | `0.12` | 刚体球半径 (m)。**实机球大小不同必改** |
+| `--ball-pos` | `None` | 球心位置 `[x y z]` (m)。默认按 home 位工具正下方自动计算；**实机球高度/位置不同必显式给出** |
+| `--tool-length` | `0.10` | 工具尖长度 (m)（EE 到尖端实际长度，实机探针不同必改） |
+| `--tool-radius` | `0.01` | 工具尖半径 (m) |
+| `--tool-mass` | `0.05` | 工具尖质量 (kg)。GAC 导纳观测的正是"工具+负载"的力平衡，实机按真实夹具质量改 |
+| `--wrist-armature` | `0.1` | 腕部 dof_armature (kg·m²)。MuJoCo 特有，实机不需要 |
+| `--ball-friction` / `--tool-friction` | `0.15` | 球/尖摩擦系数（复合 `μ=sqrt(μ₁μ₂)`）。实机按球面材质改 |
+| `--ball-solref` | `[1.0,1.0]` | MuJoCo 接触求解器时间常数 = **动态接触刚度标尺**（tc↓ → K_env_dyn↑）。实机无此概念，对应真实球刚度 |
+| `--delta-pen` | `0.008` | 目标压深 (m)。实机等效于设定接触力 `F≈K_env·pen` |
+| `--approach-speed` | `0.006` | 逼近速度 (m/s)，实机保持慢速 |
+| `--settle-time` | `1.2` | 接触建立保持时间 (s) |
+| `--theta-amp` | `0.12` | 摩擦斑经向半宽 (rad)。**GAC 关键参数**：0.12 > GIC 被动上限 0.08，靠力反馈突破摩擦面积上限 |
+| `--phi-amp` | `0.8` | 方位角 φ 摆动幅值 (rad, ±) |
+| `--rub-cycles` / `--phi-cycles` | `2` / `3` | θ/φ 维往返次数（不同频 → 填充面积） |
+| `--rub-mode` | `lissajous` | `lissajous`（稳定，默认）\| `cap`（球冠螺旋） |
+| `--rub-duration` | `16.0` | 摩擦段时长 (s)。**实机提醒**：加速测试须同步降速，否则切向过快伪失稳 |
+| `--depart-speed` | `0.05` | 抬离速度 (m/s) |
+| `--bandwidth` | `90.0` | GAC 内环期望带宽 ω_des (rad/s)，与阶段 1 稳定配方一致 |
+| `--damping` | `4.0` | GAC 内环期望阻尼比 ζ |
+| `--M-d` | `[10,10,10,1,1,1]` | 导纳虚拟质量（平动 kg / 转动 kg·m²） |
+| `--D-d` | `None` | 导纳虚拟阻尼（None = 按 K_d/M_d 临界阻尼） |
+| `--K-d` | `[5000,5000,5000,200,200,200]` | 导纳虚拟刚度：平动 5000 N/m（接触"手感"）、转动 200 Nm/rad |
+| `--max-correction` | `0.1` | 导纳滤波器最大修正量 (m/rad)（安全限幅，防碰撞超调） |
+| `--tau-delay` | `0.0` | **FT 传感器传输延迟 τ_delay (s)**：0=理想零延迟；实机按传感器手册设（UR 外部 FT 一般 1–4 ms） |
+| `--sweep` | `False` | 稳定域扫描模式（扫 K_env × τ_delay，替代单次运行） |
+| `--sweep-solref` | `[2.0,1.0,0.5,0.3,0.2,0.1,0.05,0.02]` | 球 solref 序列（tc↓ → 动态 K_env↑，9.7 kN/m → 11.3 MN/m） |
+| `--sweep-delay` | `[0.0,0.002,0.005,0.010,0.020]` | FT 延迟序列 (s)。实机场景常用上限 10 ms |
+| `--sweep-hold` | `3.0` | 扫描点 S1 接触保持时长 (s) |
+| `--no-viewer` | `False` | 无头模式 |
+| `--save-dir` | `figures/contact/` | 输出目录（`--sweep` 下含 `gac_contact_stability.json`） |
+
+产物：控制台指标（F_cv/F_pp/斑块面积）+ `figures/contact/` 下的 `gac_contact.png`、
+`gac_contact_rub.png`、`gac_contact_surface.png`；`--sweep` 追加 `gac_contact_stability.png`
+与 `gac_contact_stability.json`（逐点稳定性分类）。
+
+> **实机适配要点（阶段 2）**：除 §8.4 相同的球位/球径/工具几何外，GAC 特有的三个实机关注点：
+> ① `--tau-delay` 按真实 FT 传感器延迟设（0 = 理想，只是仿真基线）——仿真结论 **τ_delay ≲ 10 ms
+> 全 K_env 稳定**，20 ms 全极限环，实机传感器 1–4 ms 落在安全区，但必须在实机上用
+> `--sweep` 重扫真实延迟边界；② `--M-d/--D-d/--K-d` 决定"接触手感"与失稳增益
+> `K_env/K_d`，实机球刚度未知时先按 `--ball-solref 0.3`（≈184 kN/m）的保守档起步，再逐步加硬；
+> ③ 力反馈工作点必须落在硬化拐点右侧（压深 ≳ 0.5 mm），否则近零压深下
+> `K_env→810 kN/m` 使增益比 `K_env/K_d` 爆炸（bang-bang 接触弹跳极限环）。球面摩擦系数按
+> 材质标定（`μ=sqrt(μ₁μ₂)` 复合）。
 
 ---
 
@@ -692,7 +780,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -q
 | `adjoint_g_ed_deriv` 的 dVd* 前馈 bug | `core/se3_math.py` | 调用方把期望速度传入当前速度槽位；正确公式需当前 `Vb`。当前仿真不触发明显问题，实机部署前应修复 |
 | 固定增益 `task_config.gains` 为死代码 | `config/task_config.py` | 仅作文档参考，验证脚本已不再使用 |
 | 根 `readme.md` 内容过时 | `readme.md` | 建议以本文档为准或更新根 README |
-| GAC 力感知为理想化零延迟 | `verify_gac_mujoco.py` | 实机 FT 有延迟，接触稳定性边界会收缩，实机前需建模 |
+| GAC 力感知为理想化零延迟 | `verify_gac_mujoco.py` | `verify_gac_contact.py` 阶段 2 已建模 `τ_delay` 延迟线并扫出安全区间（τ≲10 ms 稳定），但 `verify_gac_mujoco.py`（无接触力模式）仍为理想零延迟 |
 
 ### 11.2 实验状态与后续
 

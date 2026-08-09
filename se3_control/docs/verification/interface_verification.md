@@ -62,13 +62,13 @@ conda activate roboarm
 cd /media/lj252/Data/catkin_ws/roboarm_test/SE3_roboarm_control
 
 # UR12e (默认)
-python3 se3_control/scripts/test_ur_hw_mock.py --robot ur12e
+python3 tests/test_ur_hw_mock.py --robot ur12e
 
 # UR3
-python3 se3_control/scripts/test_ur_hw_mock.py --robot ur3
+python3 tests/test_ur_hw_mock.py --robot ur3
 
 # 向后兼容
-python3 se3_control/scripts/test_ur12e_hw_mock.py
+python3 tests/test_ur12e_hw_mock.py
 ```
 
 ### 预期输出
@@ -120,10 +120,10 @@ python3 se3_control/scripts/test_ur12e_hw_mock.py
 
 ```bash
 # UR12e (默认)
-python3 se3_control/scripts/test_joint_states.py --ip 192.168.1.100 --duration 5
+python3 tests/test_joint_states.py --ip 192.168.1.100 --duration 5
 
 # UR3
-python3 se3_control/scripts/test_joint_states.py --robot ur3 --ip 192.168.1.101 --duration 5
+python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.101 --duration 5
 ```
 
 **对接验证要点**:
@@ -140,10 +140,10 @@ python3 se3_control/scripts/test_joint_states.py --robot ur3 --ip 192.168.1.101 
 
 ```bash
 # UR12e
-python3 se3_control/scripts/test_gravity_comp.py --ip 192.168.1.100 --phase-a-duration 3
+python3 tests/test_gravity_comp.py --ip 192.168.1.100 --phase-a-duration 3
 
 # UR3
-python3 se3_control/scripts/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 --phase-a-duration 3
+python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 --phase-a-duration 3
 ```
 
 **对接验证要点**:
@@ -159,10 +159,10 @@ python3 se3_control/scripts/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 
 
 ```bash
 # UR12e
-python3 se3_control/scripts/test_gravity_comp.py --ip 192.168.1.100 --phase-b-duration 10
+python3 tests/test_gravity_comp.py --ip 192.168.1.100 --phase-b-duration 10
 
 # UR3
-python3 se3_control/scripts/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 --phase-b-duration 10
+python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 --phase-b-duration 10
 ```
 
 **对接验证要点**:

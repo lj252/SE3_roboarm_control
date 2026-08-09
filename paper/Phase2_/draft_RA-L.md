@@ -1,14 +1,14 @@
 # "Write Once, Run on Any Arm": A Hardware-Adaptive Unified Compliant Control Framework Combining HIAC Switching with SE(3)-Equivariant GUFIC
 
 > **Target**: IEEE Robotics and Automation Letters (RA-L), 8 pages
-> **Draft Status**: v0.1 — Sections marked `[DATA PENDING]` indicate Phase 3 gaps awaiting implementation
-> **Date**: 2026-07-28
+> **Draft Status**: v0.2 — Contact-rich interaction experiments (GIC passive + GAC force-feedback press-in) added from Phase 2; sections marked `[DATA PENDING]` indicate Phase 3 gaps awaiting implementation
+> **Date**: 2026-08-07
 
 ---
 
 ## Abstract
 
-This paper presents a unified compliant control framework that bridges the impedance-admittance divide between torque-controlled and position-controlled robotic manipulators. Our approach combines three innovations: (i) a hardware-capability-adaptive hybrid impedance-admittance switching (HIAC) mechanism where the duty cycle baseline is determined by the robot's control interface class rather than solely by environment stiffness; (ii) an SE(3)-equivariant geometric impedance control (GIC) framework, designed for extension to unified force-impedance control (GUFIC), deployed on real hardware; and (iii) a thin hardware abstraction layer (10 abstract methods, <200 lines per robot) with a systematic three-layer verification methodology. The completed framework infrastructure is validated on Universal Robots UR12e and UR3 manipulators: kinematic cross-validation accuracy of 4e-11 m between Pinocchio and MuJoCo, 34/34 mock unit tests, gravity compensation drift under 5 mm over 10 minutes, and sub-0.5 mm regulation accuracy. Cross-platform experiments on UR and Franka Panda manipulators [Phase 3, in progress] will validate that the same compliant task specification can execute reliably across fundamentally different hardware platforms through a single unified API — realizing the vision of *Write Once, Run on Any Arm*.
+This paper presents a unified compliant control framework that bridges the impedance-admittance divide between torque-controlled and position-controlled robotic manipulators. Our approach combines three innovations: (i) a hardware-capability-adaptive hybrid impedance-admittance switching (HIAC) mechanism where the duty cycle baseline is determined by the robot's control interface class rather than solely by environment stiffness; (ii) an SE(3)-equivariant geometric impedance control (GIC) framework, designed for extension to unified force-impedance control (GUFIC), deployed on real hardware; and (iii) a thin hardware abstraction layer (10 abstract methods, <200 lines per robot) with a systematic three-layer verification methodology. The completed framework infrastructure is validated on Universal Robots UR12e and UR3 manipulators: kinematic cross-validation accuracy of 4e-11 m between Pinocchio and MuJoCo, 34/34 mock unit tests, gravity compensation drift under 5 mm over 10 minutes, and sub-0.5 mm regulation accuracy. Beyond regulation, contact-rich interaction is validated in simulation on the same UR models: GIC maintains stable rigid-contact surface friction (0.87 cm² patch, 24.1% force overshoot), and GAC force-feedback press-in expands the patch to 1.95 cm² while a K_env × τ_delay sweep quantifies the admittance-path stability boundary — stable for sensor delay τ ≤ 10 ms across a 9.7 kN/m → 11.3 MN/m environment-stiffness range, with limit-cycle onset at 20 ms. Cross-platform experiments on UR and Franka Panda manipulators [Phase 3, in progress] will validate that the same compliant task specification can execute reliably across fundamentally different hardware platforms through a single unified API — realizing the vision of *Write Once, Run on Any Arm*.
 
 **Keywords**: Compliant control, impedance control, admittance control, HIAC, GUFIC, SE(3) geometric control, hardware abstraction, cross-platform robotics
 
@@ -23,10 +23,10 @@ This divide is a core challenge in robot compliant control [1]–[3]. Impedance 
 This paper presents a unified compliant control framework that closes the impedance-admittance divide. Our approach layers three components (Fig. 1):
 
 1. **A hardware-capability-adaptive HIAC switching mechanism** — extending the hybrid impedance-admittance paradigm [4] so the duty cycle baseline is set by the robot's low-level control capability (torque, torque-feedforward, or position), not solely by environment stiffness (architecture designed, implementation in progress [Phase 3]).
-2. **An SE(3)-equivariant geometric impedance control framework** [5], designed for extension to unified force-impedance control (GUFIC) [9], deployed and validated on real UR12e/UR3 hardware. Full GUFIC force-tracking deployment is planned as Phase 3.
+2. **An SE(3)-equivariant geometric impedance control framework** [5], designed for extension to unified force-impedance control (GUFIC) [9], deployed and validated on real UR12e/UR3 hardware (regulation, directional decoupling) and against rigid contact in simulation (§6.3). Full GUFIC force-tracking deployment is planned as Phase 3.
 3. **A thin, robot-agnostic hardware abstraction layer** — 10 abstract methods, <200 lines per robot adapter, with a systematic three-layer verification methodology (mock unit tests → communication validation → round-trip pulse tests).
 
-The completed framework infrastructure demonstrates: 4e-11 m kinematic cross-validation accuracy, 34/34 mock tests, sub-0.5 mm regulation accuracy on real UR12e hardware, and 7.2 mm mean circle tracking in simulation. Cross-platform experiments on Franka and UR confirm consistent compliant behavior through a single unified API.
+The completed framework infrastructure demonstrates: 4e-11 m kinematic cross-validation accuracy, 34/34 mock tests, sub-0.5 mm regulation accuracy on real UR12e hardware, 7.2 mm mean circle tracking in simulation, and contact-rich interaction — GIC passive rigid-contact friction and GAC force-feedback press-in with a quantified sensor-delay stability boundary (§6.3). Cross-platform experiments on Franka and UR via the unified API are ongoing Phase 3 work.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -71,7 +71,7 @@ Earlier hybrid position/force control approaches [12], [13] employ hard switchin
 
 Geometric Impedance Control (GIC) [8] formulates impedance control directly on the SE(3) manifold, achieving equivariance under arbitrary coordinate transformations — the same control law produces identical closed-loop behavior regardless of the robot's base frame orientation. Geometric Unified Force-Impedance Control (GUFIC) [9] extends GIC with energy-tank-based passivity guarantees [6], enabling unified force and impedance control within a single SE(3) formulation.
 
-**Critical gap**: Both GIC and GUFIC have been validated only in MuJoCo simulation. No hardware deployment exists.
+**Critical gap**: Prior GIC/GUFIC work is simulation-only. We validate GIC regulation and directional decoupling on real hardware (§6.2) and GIC/GAC contact behavior in simulation (§6.3); GUFIC force tracking and contact-on-hardware deployment remain pending.
 
 ### 2.4 Cross-Platform Control Architectures
 
@@ -222,7 +222,7 @@ Core library size: ~350 lines for se3_math.py + trajectory.py + gic_controller.p
 
 Implemented for UR12e and UR3 using ur_rtde [19] over the RTDE protocol. Control mode: torque-feedforward (`setTargetTorque` with `setTargetQ`), where UR's internal position loop provides a safety net. Gravity compensation via Pinocchio RNEA achieves <5 mm drift over 10 minutes. Achieved control frequency: ~250 Hz in Python (500 Hz in C++). Each adapter: ~150 lines of code.
 
-Force sensing: UR's built-in TCP force estimation (via joint current) provides ∼2–5 N accuracy for the admittance path. An external F/T sensor (ATI Axia80 / Robotiq FT300) can be integrated for higher accuracy.
+Force sensing: UR's built-in TCP force estimation (via joint current) provides ∼2–5 N accuracy for the admittance path. An external F/T sensor (ATI Axia80 / Robotiq FT300) can be integrated for higher accuracy. The force-feedback loop's tolerance to sensing latency is quantified in §6.3.3: the admittance path remains stable for FT delay τ ≤ 10 ms over the full environment-stiffness range, comfortably covering the ≈2 ms of UR's internal estimate and the ≈1–4 ms of the external sensors above.
 
 ### 5.3 Franka Hardware Adapter [DATA PENDING]
 
@@ -275,7 +275,62 @@ Regulation task at four stiffness levels, 15-second trials, 250 Hz:
 
 **Recommended operating point**: Kp = 200 achieves sub-0.5 mm regulation with stable torque output.
 
-### 6.3 Cross-Platform Surface Sliding [DATA PENDING]
+**Directional decoupling.** A second hardware experiment measures the 6×6 static coupling matrix of the GAC and GIC paths — each input channel driven alone, the resulting displacement projected onto the orthogonal channels. At the default vertical tool-down configuration, GAC achieves F_x → Δz = 7.7% (within the <10% acceptable line) with a strictly decoupled filter layer (off-diagonal < 1e-3); the residual force→rotation coupling (up to 169%) is traced to configuration-dependent inertia anisotropy in the tracking layer — a known property of the pose, not a regression. Coupling stays bounded and redistributes across configurations rather than accumulating.
+
+### 6.3 Contact-Rich Interaction (Simulation)
+
+Contact-rich tasks are the most demanding scenario for compliant control: environment stiffness is high and unknown, and the stability margin narrows to a single contact point. We validate both control paths — GIC (impedance) and GAC (admittance) — against rigid spherical contact in MuJoCo, using the UR12e/UR3 models and a five-phase flow of approach → contact hold → surface friction → departure → hold, with a rigid tool tip contacting a rigid ball.
+
+#### 6.3.1 Dynamic Contact Stiffness Scale
+
+A prerequisite is that MuJoCo's *static* contact force (`mj_forward`) differs from the *dynamic* one (`mj_step`): near zero penetration the implicit constraint solver hardens to ≈6.4 MN/m, over two orders above the static calibration (≈18 kN/m). We therefore calibrate contact stiffness **dynamically** — the solver `solref` time constant tc maps to a dynamic stiffness K_env_dyn (Table V) spanning five orders of magnitude.
+
+**Table V.** Dynamic contact stiffness scale (UR12e model, ball radius 0.12 m; contact force ~30–34 N).
+
+| tc (`solref`) | K_env_dyn | Equilibrium penetration |
+|:---:|---:|---:|
+| 2.0 | 9.7 kN/m | ≈3 mm |
+| 1.0 | 37 kN/m | 0.8 mm |
+| 0.2 | 377 kN/m | 0.09 mm |
+| 0.02 | 11.3 MN/m | ~3 µm |
+
+Below ≈0.19 mm penetration the scale hardens sharply (implicit knee): K_env reaches ≈810 kN/m at 0.1 mm. This knee — not the far-field stiffness — governs contact stability under active control.
+
+#### 6.3.2 GIC Passive Contact (no force feedback)
+
+With the GIC gains of §6.1.2 (ω_des = 90 rad/s, ζ = 4), the flow is stable **without force feedback** — a passivity check that the impedance path does not diverge under rigid contact:
+
+- contact establishment: 24.1% force overshoot, 0.87 s settling, single make-break;
+- 2D Lissajous friction patch θ_amp = 0.08 × φ_amp = 0.8 (15×21 mm sector, **0.87 cm²**), force CV 8.9%, no detachment, no limit cycle;
+- clean departure (force zero in 376 ms, no re-contact);
+- all metrics pass on UR12e and UR3 models alike (UR3: 20.5% overshoot, 0.92 s settling, 8.8% CV).
+
+The patch area is bounded by the *passive* tangential impedance: θ_amp ≥ 0.10 drives F_cv toward the 10% threshold. §6.3.3 shows that force feedback removes this bound.
+
+#### 6.3.3 GAC Force-Feedback Press-In and Delay Stability Boundary
+
+The admittance path — position inner loop + force outer loop + sensor delay, the classical instability structure — closes the force sensor through a modeled delay line τ_delay into the GAC filter M_d·ẍ + D_d·ẋ + K_d·x = F_ext (K_d = 5000 N/m, M_d = 10 kg, critical damping, filter bandwidth ≈22 rad/s).
+
+**Friction-area breakthrough.** Force feedback actively regulates the normal force and removes the passive patch ceiling: at θ_amp = 0.12 the patch grows to **1.95 cm²** (2.2× the passive 0.87 cm²) with F_cv = 7.3%, zero contact loss, and 6.5% force overshoot (settling 1.05 s, marginally above the 1 s target).
+
+**Hardware safety interval.** Sweeping K_env_dyn (9.7 kN/m → 11.3 MN/m) × τ_delay (0–20 ms) and classifying each point as stable / limit cycle:
+
+- **τ_delay ≤ 10 ms is stable across the entire stiffness range** — comfortably covering real F/T latencies (UR FT300 ≈2 ms, ATI ≈1–4 ms);
+- τ_delay = 20 ms produces a limit cycle in every case (F peak-to-peak ≈ 52 N ≈ 158% of setpoint, ≈58 ms period).
+
+The boundary is **delay-dominated**, not stiffness-dominated: the force-loop instability mode ω_cross = √((K_d + K_env)/M_d) = 65–1000 rad/s lies far above the filter bandwidth, so the slow filter averages the fast contact oscillations and τ_delay's phase loss sets the margin. The deployment rule for the UR admittance path follows: real FT latency is safe, but the operating point must sit **right of the hardening knee** (equilibrium penetration ≳ 0.5 mm); otherwise the implicit K_env ≈ 810 kN/m raises the loop gain K_env/K_d to ≈160× and triggers a contact-bounce limit cycle (verified: friction-scenario boundary at K_env_dyn ≈ 184–377 kN/m).
+
+**Table VI.** Contact-rich experiment results (simulation, UR12e/UR3 models).
+
+| Metric | GIC passive (§6.3.2) | GAC force-feedback (§6.3.3) |
+|:---|---:|---:|
+| Friction patch area | 0.87 cm² | **1.95 cm²** |
+| Force CV (friction phase) | 8.9% | 7.3% |
+| Force overshoot | 24.1% | 6.5% |
+| Contact loss / limit cycle | none | none (τ ≤ 10 ms) |
+| Delay stability boundary | — | τ ≤ 10 ms stable / 20 ms limit cycle |
+
+### 6.4 Cross-Platform Surface Sliding [DATA PENDING]
 
 **Objective**: Execute identical compliant surface-sliding task on Franka (impedance path) and UR12e (admittance path) via the unified API.
 
@@ -285,7 +340,7 @@ Regulation task at four stiffness levels, 15-second trials, 250 Hz:
 
 **[Data collection in progress — Franka adapter and HIAC implementation are Phase 3 deliverables. Planned results: Franka 5.0 ± 0.5 N (α=0.05), UR12e 5.0 ± 1.0 N (α=0.85), consistency >85%].**
 
-### 6.4 HIAC α-Scan and Ablation [DATA PENDING]
+### 6.5 HIAC α-Scan and Ablation [DATA PENDING]
 
 **Objective**: Validate hardware-capability-adaptive α selection and demonstrate HIAC superiority over pure impedance/admittance.
 
@@ -293,7 +348,7 @@ Regulation task at four stiffness levels, 15-second trials, 250 Hz:
 
 **[Data collection in progress. Planned key finding: HIAC hybrid (α=0.85) outperforms both pure impedance (α=0, high force variance) and pure admittance (α=1, high position error). Auto-selected α within <3% of manual optimum.]**
 
-### 6.5 Summary
+### 6.6 Summary
 
 **Table IV.** Experiment results summary.
 
@@ -305,6 +360,9 @@ Regulation task at four stiffness levels, 15-second trials, 250 Hz:
 | UR mock tests | Pass rate | 34/34 | ✅ |
 | UR gravity compensation | Drift (10 min) | 2.1 mm | ✅ |
 | UR regulation (Kp=200) | Mean error | 0.33 mm | ✅ |
+| Direction decoupling (hardware) | F_x→Δz coupling | 7.7% (<10%) | ✅ |
+| GIC passive contact (sim) | Friction patch / metrics | 0.87 cm², all pass | ✅ |
+| GAC force-feedback press-in (sim) | Patch / delay boundary | 1.95 cm² / τ ≤ 10 ms | ✅ |
 | Cross-platform surface sliding | Consistency B | [DATA PENDING] | ⏳ |
 | HIAC α-scan | Optimal α range | [DATA PENDING] | ⏳ |
 | HIAC 3-mode ablation | HIAC vs pure modes | [DATA PENDING] | ⏳ |
@@ -325,10 +383,11 @@ The framework is designed for extensibility. Adding a new robot requires only (a
 | URDF parameter inaccuracy | Gravity compensation bias (~1-3 Nm residual) | Online parameter identification |
 | Hardware-adaptation α_hw mapping | α_hw values manually specified per robot class | Automated calibration via Bayesian optimization |
 | Two-robot validation | Generalizability limited to UR family | Franka Panda + KUKA iiwa expansion planned |
+| Contact experiments simulation-only | Hardware contact deployment not yet validated | UR12e/UR3 contact trials with real F/T using the §6.3.3 deployment rules |
 
 ### 7.3 Simulation-to-Reality Gap
 
-Preliminary observations of sim-to-real differences: UR control latency is estimated at ∼2 ms (network + RTDE), requiring approximately 30% gain reduction compared to simulation. Unmodeled friction produces an estimated ∼1–3 Nm bias torque at low speeds. External F/T sensor noise requires 5–10 Hz low-pass filtering. The Franka platform, with 1 kHz native torque control and joint torque sensors, is expected to exhibit a significantly smaller sim-to-real gap — motivating its selection as the impedance path platform. Systematic quantification of these factors is planned as part of Phase 3.
+Preliminary observations of sim-to-real differences: UR control latency is estimated at ∼2 ms (network + RTDE), requiring approximately 30% gain reduction compared to simulation. Unmodeled friction produces an estimated ∼1–3 Nm bias torque at low speeds. External F/T sensor noise requires 5–10 Hz low-pass filtering. Force-feedback contact stability is now quantified in simulation (§6.3.3): the admittance path tolerates FT delay up to ≈10 ms over the full environment-stiffness range, so the ≈1–4 ms latency of real F/T sensors leaves a comfortable margin; the binding constraint is instead keeping the operating point right of the contact-hardening knee (equilibrium penetration ≳ 0.5 mm). These predictions will be verified on hardware. The Franka platform, with 1 kHz native torque control and joint torque sensors, is expected to exhibit a significantly smaller sim-to-real gap — motivating its selection as the impedance path platform. Systematic quantification of these factors is planned as part of Phase 3.
 
 ---
 
@@ -336,7 +395,7 @@ Preliminary observations of sim-to-real differences: UR control latency is estim
 
 This paper presented a unified compliant control framework that bridges the impedance-admittance divide between torque-controlled (Franka) and position-controlled (UR) robotic manipulators. By combining three components — a hardware-capability-adaptive HIAC switching mechanism, the first cross-platform deployment of SE(3)-equivariant GUFIC, and a thin 10-method hardware abstraction layer — the framework enables the same compliant task specification to execute on fundamentally different robots through a single unified API.
 
-The completed Phase 1/2 infrastructure demonstrates: 4e-11 m kinematic accuracy, 34/34 mock tests, sub-0.5 mm real hardware regulation, and 7.2 mm simulation tracking. Cross-platform validation and HIAC implementation are ongoing as Phase 3.
+The completed Phase 1/2 infrastructure demonstrates: 4e-11 m kinematic accuracy, 34/34 mock tests, sub-0.5 mm real hardware regulation, 7.2 mm simulation tracking, and contact-rich interaction validated for both control paths — GIC passive rigid-contact friction and GAC force-feedback press-in with a quantified sensor-delay stability boundary. Cross-platform validation and HIAC implementation are ongoing as Phase 3.
 
 The framework will be released as open source. Extensions include full GUFIC force control, KUKA/Kinova expansion, C++ real-time core, and learning-based HIAC auto-tuning.
 
@@ -388,6 +447,6 @@ The framework will be released as open source. Extensions include full GUFIC for
 
 ---
 
-> **Draft v0.1 — Sections with [DATA PENDING] will be completed as Phase 3 (HIAC + GUFIC + Franka) progresses.**
-> **Estimated word count: ~3200 words (+ ~800 words pending). Target RA-L: ~5000 words + figures ≈ 8 pages.**
+> **Draft v0.2 — Sections with [DATA PENDING] will be completed as Phase 3 (HIAC + GUFIC + Franka) progresses.**
+> **Estimated word count: ~3600 words (+ ~800 words pending). Target RA-L: ~5000 words + figures ≈ 8 pages.**
 > **For correspondence**: [Author contact]

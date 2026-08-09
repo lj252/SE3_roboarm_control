@@ -403,6 +403,12 @@ SE3_roboarm_control/
 │   ├── scripts/
 │   │   ├── run_se3_control.py         # 仿真主入口
 │   │   ├── verify_gic_mujoco.py
+│   │   ├── verify_gac_mujoco.py
+│   │   ├── verify_gic_contact.py
+│   │   ├── verify_gac_contact.py
+│   │   └── verify_contact_calibration.py
+│   │
+│   ├── tests/                         # pytest 测试集 + 实机硬件验证脚本
 │   │   ├── test_ur_hw_mock.py         # Layer 1: Mock
 │   │   ├── test_ur12e_hw_mock.py
 │   │   ├── test_joint_states.py       # Layer 2: 状态读取

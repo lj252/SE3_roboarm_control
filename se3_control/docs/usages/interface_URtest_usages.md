@@ -4,6 +4,11 @@
 > 测试目标: UR12e / UR3 | 驱动库: ur_rtde
 >
 > **新功能**: 所有脚本支持 ``--robot ur12e|ur3`` 参数，自动切换配置。
+>
+> **脚本位置**: 实机验证脚本（``test_joint_states.py`` / ``test_gravity_comp.py`` /
+> ``test_regulation.py``）位于 ``tests/`` 目录（自 ``se3_control/scripts/`` 迁移而来），
+> 以 ``python tests/test_*.py`` 运行。它们是独立可执行脚本，不属于 pytest 测试集
+> （mock 脚本已被 ``tests/conftest.py`` 的 ``collect_ignore`` 排除）。
 
 ---
 
@@ -38,11 +43,11 @@
 示例:
 ```bash
 # UR12e (默认)
-python3 se3_control/scripts/test_joint_states.py
-python3 se3_control/scripts/test_joint_states.py --robot ur12e --ip 192.168.1.100
+python3 tests/test_joint_states.py
+python3 tests/test_joint_states.py --robot ur12e --ip 192.168.1.100
 
 # UR3
-python3 se3_control/scripts/test_joint_states.py --robot ur3 --ip 192.168.1.101
+python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.101
 ```
 
 ### 0.3 连接验证
@@ -88,10 +93,10 @@ cd /media/lj252/Data/catkin_ws/roboarm_test/SE3_roboarm_control
 conda activate roboarm
 
 # 最小用法（使用默认 IP 192.168.1.100，默认测试 5 秒）
-python3 se3_control/scripts/test_joint_states.py
+python3 tests/test_joint_states.py
 
 # 指定 IP 和测试时长
-python3 se3_control/scripts/test_joint_states.py --ip 192.168.1.101 --duration 10
+python3 tests/test_joint_states.py --ip 192.168.1.101 --duration 10
 ```
 
 ### 1.3 参数
@@ -155,10 +160,10 @@ cd /media/lj252/Data/catkin_ws/roboarm_test/SE3_roboarm_control
 conda activate roboarm
 
 # 默认参数
-python3 se3_control/scripts/test_gravity_comp.py
+python3 tests/test_gravity_comp.py
 
 # 指定 IP 和控制周期
-python3 se3_control/scripts/test_gravity_comp.py --ip 192.168.1.100 --dt 0.004
+python3 tests/test_gravity_comp.py --ip 192.168.1.100 --dt 0.004
 ```
 
 ### 2.3 参数
@@ -241,10 +246,10 @@ cd /media/lj252/Data/catkin_ws/roboarm_test/SE3_roboarm_control
 conda activate roboarm
 
 # 极低增益 Kp=50 (默认, 安全)
-python3 se3_control/scripts/test_regulation.py
+python3 tests/test_regulation.py
 
 # 手动调参
-python3 se3_control/scripts/test_regulation.py \
+python3 tests/test_regulation.py \
   --kp 200 200 200 \
   --kr 150 150 150 \
   --kd 30 30 30 15 15 15 \

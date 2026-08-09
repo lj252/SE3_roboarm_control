@@ -505,8 +505,8 @@ python se3_control/scripts/verify_gic_mujoco.py --robot ur3   --task circle --no
 python se3_control/scripts/verify_gic_mujoco.py --control gac --robot ur12e --task regulation --no-viewer
 
 # 硬件 mock 回归
-python se3_control/scripts/test_ur_hw_mock.py --robot ur12e
-python se3_control/scripts/test_ur_hw_mock.py --robot ur3
+python tests/test_ur_hw_mock.py --robot ur12e
+python tests/test_ur_hw_mock.py --robot ur3
 ```
 
 ---
