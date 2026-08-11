@@ -91,8 +91,14 @@ class GICController:
         g_ed = np.linalg.inv(g) @ gd
 
         # ── 3. 期望速度变换到体坐标系 ──────────────────────────
-        Vd = np.hstack((vd, wd)).reshape((-1, 1))
-        dVd = np.hstack((dvd, dwd)).reshape((-1, 1))
+        # 注意: eval_body_twist 返回的 vd/wd 是 (3,1) 列向量;
+        # np.hstack((vd, wd)) 会把两个 (3,1) 沿 axis=1 拼成 (3,2),
+        # 再 reshape 成交错序 [vx, wx, vy, wy, vz, wz], 与块序 [v; w] 的
+        # adjoint_g_ed / e_op / ev / M̃ 全部错位 (v_d,y 被当成 v_d,z,
+        # 造成 ~34 mm/s 虚假 z 速度参考 → 画圆平面倾斜 ~11 mm).
+        # 修复: 先 ravel 到 (3,) 再拼接, 得到块序 [v; w].
+        Vd = np.concatenate([np.asarray(vd).ravel(), np.asarray(wd).ravel()]).reshape((-1, 1))
+        dVd = np.concatenate([np.asarray(dvd).ravel(), np.asarray(dwd).ravel()]).reshape((-1, 1))
 
         # 当前体速度 Vb —— 供 dVd_star 中 d/dt(Ad_{g_ed}) 使用.
         # adjoint_g_ed_deriv(g, gd, v, w, vd, wd) 的 (v,w) 槽位是当前体速度,

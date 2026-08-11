@@ -5,7 +5,7 @@
 > 形成系统认识，并知道每个实验怎么跑、改哪些参数。
 >
 > 适用范围：`se3_control/` 的全部仿真代码，以及 `docs/`、`se3_control/docs/` 的全部文档。
-> 最后更新：2026-08-07
+> 最后更新：2026-08-11
 
 ---
 
@@ -132,7 +132,7 @@ Franka 上无需改动即可运行。
 | Phase 0 | 接触模型标定（MuJoCo 接触数值特性） | ✅ 已完成 |
 | Phase 1 | GIC 被动接触全流程（逼近/接触/摩擦/离开） | ✅ 已完成 |
 | Phase 2 | GAC 力模式实验 + 方向解耦 + 扫频 + 负载突变 | 🚧 部分完成 |
-| Phase 3 | 实机部署（UR12e 首个） | ⏳ 规划中 |
+| Phase 3 | 实机部署（UR3 先行：circle/line 迁移真机） | 🚧 进行中 |
 | Phase 4 | UR3 / Franka 扩展 | ⏳ 规划中 |
 
 ### 2.3 自适应增益 vs 固定增益
@@ -341,6 +341,7 @@ verification（验证）**”分层。
 | ③ | 刚性接触（GIC 被动接触 + **GAC 压入**） | GIC 基线 / **GAC 主测** | ✅ 已实现 |
 | ④ | 负载突变（鲁棒性） | GAC / GIC 同测 | ⏳ 仅设计（未实现脚本） |
 | — | GAC 力模式实验（5 种外力） | GAC | ✅ 已实现 |
+| — | 真机 circle/line 迁移（UR3，校准后坐标） | GIC 实机 | 🚧 已迁移，倾斜圆已定位并修复（见 §7.7 / §11.3） |
 
 ### 7.1 Phase 0 — 接触模型标定（`verify_contact_calibration.py`）
 
@@ -468,6 +469,22 @@ F_cv=7.3% 全程不脱离；② 扫 K_env × τ_delay 出硬件安全区间—�
 > 对扫频/解耦可接受，但对接触稳定性是系统性乐观（实机 FT 有延迟，失稳边界随
 > 延迟急剧收缩），实机前需建模延迟。
 
+### 7.7 真机 circle/line 迁移（UR3，2026-08-11）
+
+基座校准（§9.2）完成后，circle/line 任务迁移到 UR3 实机（`servoJ` 控制模式，真实数据在
+`logs/run_02`、`logs/run_03`，仿真对照在 `logs/sim_02`、`logs/sim_dt_full`、`logs/sim_servo_full`）：
+
+- **run_02（bandwidth 10 → 6）**：发散根因确认并消除——高带宽（10）下 servoJ 内层
+  （增益式、无前馈、有延迟）追不上参考，肘部力矩饱和 + 参考积分漂移 → ~4.8s 折叠发散；
+  降带宽后 16s 完整跟踪、pos_err 终值 0.3 cm、力矩饱和 0%、无折叠特征。
+- **RTDE 全程 `safety_mode=1`（REDUCED）无保护性停止**：用户观察到的"保护性停止"发生在
+  `hw.shutdown()` 关机/释放环节，不在跟踪过程内。
+- **控制频率实测 228.6 Hz（< 标称 250 Hz）**：61.7% 控制周期超 4ms，是残余
+  `q_servo−q` 漂移（RMS 35 mrad）的来源，限制精度上限但不影响稳定。
+- **run_03（校准后坐标，圆心 `[-0.38, 0, 0.224]`）**：发现 circle 画出的圆是
+  **倾斜平面而非水平面**——仿真与真机几乎完全一致；根因已定位为 `gic_controller.py`
+  期望速度拼装顺序错误并修复（见 §11.3），仿真验证倾斜消除。
+
 ---
 
 ## 8. 实验启动命令与参数
@@ -571,7 +588,8 @@ python se3_control/scripts/verify_gic_contact.py --ball-pos 0.55 0.0 0.32 --ball
 | `--tool-mass` | `0.05` | 工具尖质量 (kg)（模拟 FT 传感器前的工具惯量，实机按真实夹具质量改） |
 | `--wrist-armature` | `0.1` | 腕部电机转子惯量补偿 (dof_armature, kg·m²)。MuJoCo 特有（修正 URDF 缺腕部惯量），实机不需要 |
 | `--ball-friction` / `--tool-friction` | `0.15` | 球/尖摩擦系数（复合 `μ=sqrt(μ₁μ₂)`）。实机按球面材质改，如钢球橡胶头常用 ~0.5 |
-| `--ball-solref` | `[1.0,1.0]` | MuJoCo 接触求解器时间常数，**动态接触刚度标尺**（仿真调试用；实机无此概念，对应的是真实球刚度） |
+| `--ball-solref` | `[1.0,1.0]` | MuJoCo 接触求解器时间常数，**动态接触刚度标尺**（仿真调试用；实机无此概念，对应的是
+        theta = 2 * math.真实球刚度） |
 | `--ball-solimp-width` | `None` | 球 solimp[2] 宽度（近零压深硬化拐点宽度，仿真调试用，实机无效） |
 | `--delta-pen` | `0.008` | 目标压深 (m)。实机等效于设定接触力：`F ≈ K_env·pen`，要更轻/更重接触力就改它 |
 | `--approach-speed` | `0.006` | 逼近速度 (m/s)。实机建议保持慢速（冲击超调小） |
@@ -729,8 +747,16 @@ python se3_control/scripts/verify_gac_contact.py --sweep \
 | 安全力矩限幅 (N·m) | `[165,165,75,27,27,27]` | `[28,28,14,6,6,6]` |
 | 满额力矩限幅 | `[330,330,150,54,54,54]` | `[56,56,28,12,12,12]` |
 | `home_q` | `[-0.356,-1.498,1.81,1.259,1.571,-0.124]` | `[-0.327,-1.42,1.236,-1.386,-1.571,2.738]` |
-| home 处 EE 位姿 | `[0.50, 0, 0.50]`，工具 z 轴 `[0,0,-1]` | `[0.35, 0, 0.35]`，工具 z 轴 `[0,0,-1]` |
+| home 处 EE 位姿 | `[0.50, 0, 0.50]`，工具 z 轴 `[0,0,-1]` | `[-0.35, 0, 0.224]`，工具 z 轴 `[0,0,-1]` |
 | URDF | 项目内 urdf/ | 项目内 urdf/ |
+
+> **基座校准（2026-08-11 完成，仅 UR3）**：`ur3.urdf` 中 `shoulder_pan_joint` 加基座
+> yaw180°（`rpy = 0 0 π`），`flange-tool0` 固定关节加 tool0 沿自身 +z 偏移 0.126 m，
+> 使模型 `FK(tool0, home_q) == RTDE actual_TCP_pose` = `(-0.350, 0.000, 0.224)`。
+> 结论：实机与模型的偏差是 **tool0/TCP 偏移**（实机 TCP 比法兰低 0.126 m）+ 方向 yaw180°，
+> 不是基座高度（整机平移会把连杆错放低 0.126 m，home 时上臂中点距基座轴过近导致假碰撞）。
+> 校准后任务坐标已换算（circle/line 圆心 `[-0.38, 0, 0.224]`），MuJoCo `--preview`
+> site 已同步到 tool0。
 
 Franka（预留）：硬编码在脚本中，9 关节，`home_q=[0,-0.3,0,-2.5,0,2.5,0,0.02,0.02]`，
 EE link `panda_hand_tcp`。仅在 UR12e/UR3 全量通过后接入。
@@ -777,10 +803,12 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -q
 
 | 问题 | 位置 | 说明 |
 |---|---|---|
-| `adjoint_g_ed_deriv` 的 dVd* 前馈 bug | `core/se3_math.py` | 调用方把期望速度传入当前速度槽位；正确公式需当前 `Vb`。当前仿真不触发明显问题，实机部署前应修复 |
+| **circle 倾斜圆（已定位并修复 ✅）** | `core/gic_controller.py` | 根因=期望速度拼装顺序错误（(3,1) 列向量 hstack 后 reshape 成交错序，vd_y 泄漏进 z 通道），修复后仿真 e_w z 11.26→0.23 mm。详见 §11.3 |
+| `adjoint_g_ed_deriv` 的 dVd* 前馈 bug | `core/se3_math.py` | 调用方把期望速度传入当前速度槽位；正确公式需当前 `Vb`。已在倾斜圆排查中复核（w≈0 时影响 ~7e-6，非倾斜主因） |
 | 固定增益 `task_config.gains` 为死代码 | `config/task_config.py` | 仅作文档参考，验证脚本已不再使用 |
 | 根 `readme.md` 内容过时 | `readme.md` | 建议以本文档为准或更新根 README |
 | GAC 力感知为理想化零延迟 | `verify_gac_mujoco.py` | `verify_gac_contact.py` 阶段 2 已建模 `τ_delay` 延迟线并扫出安全区间（τ≲10 ms 稳定），但 `verify_gac_mujoco.py`（无接触力模式）仍为理想零延迟 |
+| UR3 控制频率低于标称 | `run_se3_control.py` + 实机 | 实测平均 228.6 Hz < 标称 250 Hz（61.7% 周期 >4ms），是残余 `q_servo−q` 漂移来源 |
 
 ### 11.2 实验状态与后续
 
@@ -789,8 +817,59 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -q
 | 实验一（正弦扫频） | 仅设计 | 实现 `--experiment sweep`（`ForceProfile.sine_sweep`） |
 | 实验四（负载突变） | 仅设计 | 实现 `--experiment loadstep` |
 | GAC 力感知延迟 | 理想化 | 建 FT 延迟模型，重验接触稳定边界 |
-| 实机部署 | 规划中 | 按 `docs/deploy_se3_gic_to_ur12_plan.md` Phase 3 落地 UR12e GIC |
+| 实机部署（UR3） | 🚧 进行中 | 基座校准完成（FK==RTDE）；circle/line 已迁移真机（run_02 稳定、run_03 发现倾斜圆）；**倾斜圆已定位修复（§11.3），真机复跑验证 + 推广到 UR12e** |
+| 倾斜圆问题 | ✅ 已修复（仿真验证） | 根因=期望速度拼装顺序错误 → `gic_controller.py` 已修正 → 仿真验证倾斜消失 + 74 测试通过（见 §11.3）；待真机复跑确认 |
 | Franka | 预留 | UR12e/UR3 全量验证后接入（`RobotHWInterface` 加 libfranka 实现） |
+
+### 11.3 问题定位：circle 倾斜圆（2026-08-11，已定位并修复 ✅）
+
+**现象**：circle 任务画出的圆不在水平面上，而是倾斜平面。仿真与真机几乎完全一致：
+
+| 来源 | 平面拟合 | z-std |
+|---|---|---|
+| 仿真 `logs/sim_dt_full`（直接 GIC，理想闭环） | `z = 0.054x − 0.270y + 0.244` | 10.5 mm |
+| 真机 `logs/run_03`（UR3，校准后坐标） | `z = 0.051x − 0.266y + 0.242` | 11.0 mm |
+
+**根因（已确认，非低带宽）**：`core/gic_controller.py` 中期望速度拼装的
+**列向量顺序错误**。`eval_body_twist` 返回的 `vd`/`wd` 是 **(3,1) 列向量**，原写法
+
+```python
+Vd = np.hstack((vd, wd)).reshape((-1, 1))   # 错误
+```
+
+`np.hstack((vd, wd))` 把两个 (3,1) 沿 axis=1 拼成 **(3,2) 矩阵**，再按行优先
+`reshape(-1,1)` 得到**交错序** `[vx, wx, vy, wy, vz, wz]`，而 `adjoint_g_ed`、
+`e_op`、`ev`、`M̃`、`K_adapt`/`D_adapt` 全部按**块序** `[vx,vy,vz,wx,wy,wz]` 排列。
+错位后 `vd_y`（圆轨迹上 ≈34 mm/s 的切向速度）被当成 `Vd_z` 注入 z 通道参考，
+经阻尼项 `2ζω·ev_z` 产生 ~11 mm 的 z 向稳态跟踪误差 → 圆平面倾斜。
+
+**验证证据**（闭环可控实验，`/tmp/cl_sim.py`，plant=model）：
+- 消除性实验：把拼装改成块序 `np.vstack((vd,wd))` → **e_w z RMS 11.3 mm → 0.2 mm**，
+  `corr(e_z,e_x)` 从 −1.000（直线相关=平面）→ +0.002（水平）；
+- 其他假设全部排除：M̃ 非对角耦合（`diag_Mt` 手术不变）、P 投影偏差
+  （`P_identity` 不变，P≈I 偏差仅 0.0017）、前馈 dVd*（`FF=0` 不变）、低带宽
+  （控制器实测以 ω=6 运行，复刻控制器与 CSV τ 完全一致）——均不是主因；
+- 真实 MuJoCo 预览仿真修复后：`e_w` z 向 RMS **11.26 mm → 0.23 mm**，平面残差
+  z-std 0.11 mm，圆恢复水平。
+
+**修复**（已应用，74 个测试通过）：先 `ravel()` 到 (3,) 再 `np.concatenate`，得到块序 `[v; w]`：
+`gic_controller.py:100` 与 `monitor_sim.py` 同处一并修正（monitor 里也犯了一样的错误，
+解释了此前 §11.3 里"仿真带宽仅 0.5"的假象——重建 τ 用了同样错位的 Vd，拟合出来的
+"低带宽"是重建伪影；修复后 `--fit-bandwidth` 精确拟合回 ω_eff=6.001、残差 0.0 mN·m）。
+
+**同源 bug 排查结果**：`gac_controller.py` 的 `_compute_tracking` 有**完全相同的**
+`np.hstack((vd,wd))` 拼装问题（416-417 行），且 `adjoint_g_ed_deriv` 调用还额外把期望速度
+传进当前速度槽位、把期望加速度传进期望速度槽位（420 行）——一并修复。GAC circle
+仿真对比：修复后稳态 pos_err **8.7 mm → 0.096 mm**（约 90 倍改善）。注意此 bug 在修复前
+同样影响了 **实验2 球面接触（GAC）** 的早期结果（见 §7 实验2），若重跑实验2 数值会变。
+GUFIC 尚未实现（Phase 3 预留），无此问题。全部 74 个测试通过。
+
+**遗留疑问（下次继续）**：控制器修复后真机重跑是否同样恢复水平（仿真已确认）。
+
+**监控脚本**：`monitor_sim.py`（仓库根目录）——逐周期重建 GIC 内部量，盯 z 行强迫分解：
+`dVd*_z`、`FF_z = (M̃·dVd*)_z`、`e_op_z`/`ev_z`、`corr_z`、`plant_cmd_z = (M̃inv·τ̃)_z`、
+`Ĵb·q̇`、`resid_z`，外加平面拟合与 `--fit-bandwidth`（修复后拟合回 ω_eff=6.001）。
+用法：`python monitor_sim.py --robot ur3 --task circle --csv logs/mon_dt_fix --fit-bandwidth`。
 
 ---
 

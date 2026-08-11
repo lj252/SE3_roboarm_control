@@ -413,11 +413,20 @@ class GACController:
         g_ed = np.linalg.inv(g) @ gd
 
         # ── 3. 期望速度变换到体坐标系 ──────────────────────────
-        Vd = np.hstack((vd, wd)).reshape((-1, 1))
-        dVd = np.hstack((dvd, dwd)).reshape((-1, 1))
+        # 注意: vd/wd 是 (3,1) 列向量 (eval_body_twist 或 _correct_trajectory 输出),
+        # np.hstack((vd, wd)) 会拼成 (3,2) 再 reshape 成交错序 [vx,wx,vy,wy,vz,wz],
+        # 与块序 [v; w] 的 adjoint_g_ed / e_op / ev / M̃ 全部错位 (与 GIC 同 bug,
+        # 见 gic_controller.py / §11.3). 先 ravel 到 (3,) 再拼接, 得到块序 [v; w].
+        Vd = np.concatenate([np.asarray(vd).ravel(), np.asarray(wd).ravel()]).reshape((-1, 1))
+        dVd = np.concatenate([np.asarray(dvd).ravel(), np.asarray(dwd).ravel()]).reshape((-1, 1))
 
+        # 当前体速度 Vb —— 供 dVd_star 中 d/dt(Ad_{g_ed}) 使用:
+        # adjoint_g_ed_deriv(g, gd, v, w, vd, wd) 的 (v,w) 槽位是当前体速度,
+        # (vd,wd) 才是期望速度; 修复前误把期望速度 vd/wd 传进当前速度槽位、
+        # 把期望加速度 dvd/dwd 传进期望速度槽位.
+        Vb = self.robot.get_body_ee_velocity()
         Vd_star = adjoint_g_ed(g_ed) @ Vd
-        dVd_star = (adjoint_g_ed_deriv(g, gd, vd, wd, dvd, dwd) @ Vd
+        dVd_star = (adjoint_g_ed_deriv(g, gd, Vb[:3], Vb[3:], vd, wd) @ Vd
                      + adjoint_g_ed(g_ed) @ dVd)
 
         # ── 4. SE(3) 误差 (体坐标系) ────────────────────────────
@@ -428,7 +437,6 @@ class GACController:
         e_op = np.vstack((e_pos, e_rot))
 
         # ── 5. 速度误差 ────────────────────────────────────────
-        Vb = self.robot.get_body_ee_velocity()
         ev = Vb - Vd_star
 
         # ── 6. 操作空间惯性 ────────────────────────────────────
