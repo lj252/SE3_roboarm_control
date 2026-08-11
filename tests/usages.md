@@ -84,7 +84,7 @@ python3 tests/test_ur_hw_mock.py
 python3 tests/test_ur_hw_mock.py --robot ur3
 
 # 指定 IP（mock 模式下不真正连接）
-python3 tests/test_ur_hw_mock.py --ip 192.168.1.101
+python3 tests/test_ur_hw_mock.py --ip 192.168.1.11
 ```
 
 **测试内容**：
@@ -133,7 +133,7 @@ python3 tests/test_joint_states.py
 python3 tests/test_joint_states.py --ip 192.168.1.100 --duration 10
 
 # UR3
-python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.101
+python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.11
 ```
 
 **输出示例**：
@@ -163,7 +163,7 @@ python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.101
 python3 tests/test_gravity_comp.py
 
 # UR3
-python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.101
+python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.11
 
 # 自定义测试时长
 python3 tests/test_gravity_comp.py --phase-a-duration 5 --phase-b-duration 20
@@ -196,7 +196,7 @@ python3 tests/test_regulation.py
 python3 tests/test_regulation.py --kp 100 100 100 --kr 80 80 80 --duration 30
 
 # UR3
-python3 tests/test_regulation.py --robot ur3 --ip 192.168.1.101 --kp 30 30 30
+python3 tests/test_regulation.py --robot ur3 --ip 192.168.1.11 --kp 30 30 30
 ```
 
 **控制律**（简化 GIC，无自适应惯性）：

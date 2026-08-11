@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import socket
 import time
 from typing import List, Optional, Tuple
 
@@ -68,6 +69,14 @@ _DEFAULT_DT = 0.004
 # 默认连接超时 (秒)
 _DEFAULT_TIMEOUT = 5.0
 
+# RTDE safety_mode → 中文标签 (UR 官方枚举)
+_SAFETY_MODE_LABELS = {
+    1: '正常', 2: '降级', 3: '保护性停止', 4: '恢复中',
+    5: '安全防护停止', 6: '系统急停', 7: '机器人急停', 8: '急停',
+    9: '剧烈碰撞', 10: '故障', 11: '参数校验', 12: '无电源',
+    13: '无安全控制器', 14: '反向驱动',
+}
+
 
 # ================================================================
 # URHW
@@ -96,6 +105,8 @@ class URHW(RobotHWInterface):
         timeout: float = _DEFAULT_TIMEOUT,
         verbose: bool = True,
         logger: Optional[logging.Logger] = None,
+        servo_lookahead: float = 0.1,
+        servo_gain: float = 1000.0,
     ):
         if not _UR_RTDE_AVAILABLE:
             raise ImportError(_UR_RTDE_IMPORT_ERROR)
@@ -112,6 +123,14 @@ class URHW(RobotHWInterface):
         # RTDE 接口实例
         self._recv: Optional[rtde_receive.RTDEReceiveInterface] = None
         self._ctrl: Optional[rtde_control.RTDEControlInterface] = None
+
+        # CB3 servoJ 回退模式 (默认关; set_servo_mode() 切换)
+        self._servo_mode = False
+        self._servo_lookahead = float(servo_lookahead)
+        self._servo_gain = float(servo_gain)
+        self._servo_speed = 0.0
+        self._servo_accel = 0.0
+        self._last_cycle_mono: Optional[float] = None
 
         # 初始力矩限幅
         self.set_torque_limits(np.asarray(torque_limits, dtype=float).copy())
@@ -144,6 +163,20 @@ class URHW(RobotHWInterface):
             return
 
         self._logger.info(f"正在连接 {self._robot_name} @ {self._ip} ...")
+
+        # TCP 预检: RTDEReceiveInterface 对不可达 IP 会无限阻塞,
+        # 先用 self._timeout 限定 socket 连接, 使"机器人不在线"快速失败而非挂死.
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.settimeout(self._timeout)
+            probe.connect((self._ip, 30004))   # RTDE 端口
+            probe.close()
+        except OSError as e:
+            self._connected = False
+            raise HardwareConnectionError(
+                f"无法连接 {self._robot_name} @ {self._ip}:30004 (RTDE): {e}\n"
+                f"  请确认: 机械臂已开机 / IP 正确 / 教示器处于 Remote Control 模式"
+            ) from e
 
         try:
             # 先建立接收接口 (超时短, 快速失败)
@@ -203,13 +236,16 @@ class URHW(RobotHWInterface):
 
         self._logger.info(f"正在断开 {self._robot_name} 连接 ...")
 
-        # 先发零力矩 (安全)
+        # 先停伺服 / 发零力矩 (安全)
         n_joints = len(self._joint_names)
         try:
             if self._ctrl is not None and self._ctrl.isConnected():
-                self._ctrl.directTorque([0.0] * n_joints)
+                if self._servo_mode:
+                    self._ctrl.servoStop()
+                else:
+                    self._ctrl.directTorque([0.0] * n_joints)
         except Exception as e:
-            self._logger.warning(f"力矩置零失败: {e}")
+            self._logger.warning(f"置零失败: {e}")
 
         # 断开控制接口
         try:
@@ -285,6 +321,11 @@ class URHW(RobotHWInterface):
         if self._emergency_stopped:
             raise HardwareSafetyError("急停已触发 — 禁止发力矩")
 
+        if self._servo_mode:
+            raise HardwareSafetyError(
+                "当前为 servoJ 回退模式 (CB3, 无 directTorque), "
+                "请用 set_servo_joint_positions() 下发关节目标位")
+
         if not self._connected or self._ctrl is None:
             raise HardwareConnectionError(f"未连接 {self._robot_name}")
 
@@ -300,6 +341,74 @@ class URHW(RobotHWInterface):
             raise HardwareTimeoutError(
                 f"RTDE 力矩指令发送失败: {e}"
             ) from e
+
+    def set_servo_mode(self, servo: bool) -> None:
+        """切换 CB3 servoJ 回退模式.
+
+        CB3 classic (固件 < 5.23) 无 directTorque, ur_rtde 会静默移除该命令.
+        servo=True 时:
+          - set_joint_torques() 抛 HardwareSafetyError (防误发死的 directTorque)
+          - 控制节奏由 servoJ 的 ``time`` 参数 (阻塞 dt) 提供, wait_next_cycle()
+            改为按真实经过时间补足 dt.
+        """
+        self._servo_mode = bool(servo)
+        self._last_cycle_mono = None
+        self._logger.info(f"控制模式: {'servoJ (CB3 回退)' if self._servo_mode else 'directTorque'}")
+
+    def set_servo_joint_positions(self, q_target: np.ndarray,
+                                  speed: Optional[float] = None,
+                                  accel: Optional[float] = None,
+                                  lookahead: Optional[float] = None,
+                                  gain: Optional[float] = None) -> None:
+        """CB3 回退: 以 servoJ 关节位置伺服下发关节目标位.
+
+        上层 ServoJTorqueBridge 把 GIC 力矩折算成关节目标位, 这里只做下发.
+        servoJ 全版本支持 (无版本门控), 是 CB3 上驱动机械臂的标准原语.
+
+        :param q_target: ndarray (nv,) — 关节目标位 (rad)
+        :param speed:    关节速度上限 (rad/s); None=不用 (ur_rtde 当前版本忽略)
+        :param accel:    关节加速度上限 (rad/s²); None=不用 (ur_rtde 当前版本忽略)
+        :param lookahead: 0.03–0.2 s, 越小越灵敏; None=用 __init__ 默认 0.1
+        :param gain:      100–2000, 越高跟踪越紧; None=用 __init__ 默认 1000
+
+        servoJ 的 ``time`` 参数取 ``self._dt``, 调用会阻塞 ``self._dt`` 秒
+        (提供控制循环节奏).
+        """
+        if self._emergency_stopped:
+            raise HardwareSafetyError("急停已触发 — 禁止伺服")
+
+        if not self._connected or self._ctrl is None:
+            raise HardwareConnectionError(f"未连接 {self._robot_name}")
+
+        q = np.asarray(q_target, dtype=float).ravel()
+        n_joints = len(self._joint_names)
+        if q.shape[0] != n_joints:
+            raise ValueError(f"关节目标位长度 {q.shape[0]} ≠ {n_joints}")
+        if not np.all(np.isfinite(q)):
+            raise ValueError("关节目标位含 NaN/Inf")
+
+        spd = self._servo_speed
+        acc = self._servo_accel
+        lk = self._servo_lookahead if lookahead is None else float(lookahead)
+        gn = self._servo_gain if gain is None else float(gain)
+
+        if not (0.03 <= lk <= 0.2):
+            self._logger.warning(f"lookahead_time {lk} 超出 [0.03,0.2], 已限幅")
+            lk = np.clip(lk, 0.03, 0.2)
+        if not (100 <= gn <= 2000):
+            self._logger.warning(f"gain {gn} 超出 [100,2000], 已限幅")
+            gn = np.clip(gn, 100, 2000)
+
+        try:
+            ok = self._ctrl.servoJ(q.tolist(), spd, acc, self._dt, lk, gn)
+            if not ok:
+                raise HardwareTimeoutError(
+                    "servoJ 返回失败 — 检查教示器是否处于远程控制且程序运行中")
+        except HardwareTimeoutError:
+            raise
+        except Exception as e:
+            self._logger.error(f"servoJ 下发失败: {e}")
+            raise HardwareTimeoutError(f"RTDE servoJ 指令发送失败: {e}") from e
 
     # ── 定时 ──────────────────────────────────────────────────
 
@@ -318,6 +427,18 @@ class URHW(RobotHWInterface):
 
         :returns: 自上次 initPeriod/waitPeriod 以来实际经过的时间 (秒)
         """
+        if self._servo_mode:
+            # servoJ 的 time 参数已阻塞 dt; 这里按真实经过时间补足, 保证周期 ≥ dt
+            now = time.monotonic()
+            if self._last_cycle_mono is None:
+                self._last_cycle_mono = now
+                return self._dt
+            elapsed = now - self._last_cycle_mono
+            self._last_cycle_mono = now
+            if elapsed < self._dt:
+                time.sleep(self._dt - elapsed)
+            return max(elapsed, self._dt)
+
         if self._ctrl is None:
             # 无连接时模拟定时
             time.sleep(self._dt)
@@ -341,14 +462,18 @@ class URHW(RobotHWInterface):
         """
         super().emergency_stop()  # 设置标志位
 
-        # 立即发力矩为零
+        # 立即停伺服 / 发力矩为零
         n_joints = len(self._joint_names)
         try:
             if self._ctrl is not None and self._ctrl.isConnected():
-                self._ctrl.directTorque([0.0] * n_joints)
-                self._logger.warning(f"[EMERGENCY STOP] {self._robot_name} 力矩已置零")
+                if self._servo_mode:
+                    self._ctrl.servoStop()
+                    self._logger.warning(f"[EMERGENCY STOP] {self._robot_name} servoJ 已停止")
+                else:
+                    self._ctrl.directTorque([0.0] * n_joints)
+                    self._logger.warning(f"[EMERGENCY STOP] {self._robot_name} 力矩已置零")
         except Exception as e:
-            self._logger.error(f"[EMERGENCY STOP] 力矩置零失败: {e}")
+            self._logger.error(f"[EMERGENCY STOP] 置零失败: {e}")
 
     # ── 状态查询 ──────────────────────────────────────────────
 
@@ -375,6 +500,19 @@ class URHW(RobotHWInterface):
     def get_error_state(self) -> int:
         """获取 UR 机械臂安全状态。
 
+        以 RTDE ``safety_mode`` 字段为主判据 — 跨 CB3 classic / e-Series 固件
+        语义最一致的权威字段:
+          1 正常 / 2 降级 / 4 恢复中 / 11-14  → 0 (可继续控制)
+          3 保护性停止 / 9 剧烈碰撞           → 2
+          5 安全防护停止                      → 3
+          6/7/8 各级急停                      → 1
+          10 故障                             → 4
+
+        之前用 ``isEmergencyStopped()/isProtectiveStopped()`` (按 ur_rtde 的
+        SafetyStatus 位布局测试 safety_status_bits: bit7=急停, bit2=保护性停止),
+        在 classic CB3 上 safety_status_bits 位义可能与 e-Series 不同, 出现过
+        "safety_mode=1 正常 但误判急停" 的情况; 故 safety_status_bits 仅作兜底.
+
         :returns:
             0 = 正常
             1 = 急停触发
@@ -385,29 +523,67 @@ class URHW(RobotHWInterface):
         if not self._connected:
             return 1  # 未连接视为错误
 
+        # ── 主判据: safety_mode ──
         try:
-            if self._recv is not None and self._recv.isEmergencyStopped():
+            mode = int(self._recv.getSafetyMode())
+        except Exception:
+            mode = None
+
+        if mode is not None:
+            if mode in (6, 7, 8):   # 系统急停 / 机器人急停 / 急停
                 return 1
-        except Exception:
-            pass
-
-        try:
-            if self._recv is not None and self._recv.isProtectiveStopped():
+            if mode in (3, 9):      # 保护性停止 / 剧烈碰撞
                 return 2
-        except Exception:
-            pass
+            if mode == 5:           # 安全防护停止
+                return 3
+            if mode == 10:          # 故障
+                return 4
+            return 0                # 1 正常 / 2 降级 / 4 恢复中 / 11-14 → 可继续
 
+        # ── 兜底: safety_status_bits (仅当 safety_mode 读取失败时) ──
+        # 位序参考 ur_rtde SafetyStatus 枚举 (e-Series 布局).
         try:
-            if self._recv is not None:
-                safety_bits = self._recv.getSafetyStatusBits()
-                if safety_bits & 0b11:   # 位0/1: 安全模式
-                    return 3
-                if safety_bits & 0b1100: # 位2/3: 严重安全错误
-                    return 4
+            safety_bits = self._recv.getSafetyStatusBits()
+            if safety_bits & (1 << 7):   # 急停
+                return 1
+            if safety_bits & (1 << 2):   # 保护性停止
+                return 2
+            if safety_bits & (1 << 4):   # 安全防护停止
+                return 3
+            if safety_bits & (1 << 9):   # 故障
+                return 4
         except Exception:
             pass
 
         return 0
+
+    def get_safety_status_bits(self) -> Optional[int]:
+        """读取 RTDE ``safety_status_bits`` 原始值 (诊断用).
+
+        :returns: 原始位值 (uint32); 未连接或读取失败返回 None
+        """
+        if not self._connected or self._recv is None:
+            return None
+        try:
+            return int(self._recv.getSafetyStatusBits())
+        except Exception:
+            return None
+
+    def get_safety_mode(self) -> Optional[Tuple[int, str]]:
+        """读取 UR 安全模式 (RTDE `safety_mode`) — 比 safety bits 更精确。
+
+        典型值: 3=保护性停止, 5=安全防护停止, 9=剧烈碰撞, 6/7/8=各级急停,
+        10=故障。用于精确定位"刚发力矩就停"的原因。
+
+        :returns: (mode, 中文标签); 读取失败或未连接返回 None
+        """
+        if not self._connected or self._recv is None:
+            return None
+        try:
+            mode = int(self._recv.getSafetyMode())
+            return mode, _SAFETY_MODE_LABELS.get(mode, '未知')
+        except Exception:
+            return None
 
     # ── 配置 ──────────────────────────────────────────────────
 

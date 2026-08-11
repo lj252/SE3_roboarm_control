@@ -23,7 +23,7 @@ Step 3: 力矩下发验证 + 重力补偿验证
 用法:
   conda activate roboarm
   python se3_control/scripts/test_gravity_comp.py [--ip 192.168.1.100]
-  python se3_control/scripts/test_gravity_comp.py --robot ur3 --ip 192.168.1.101
+  python se3_control/scripts/test_gravity_comp.py --robot ur3 --ip 192.168.1.11
 """
 
 import argparse

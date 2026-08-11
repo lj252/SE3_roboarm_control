@@ -177,6 +177,29 @@ class RobotModel:
         R = placement.rotation.copy()
         return p, R
 
+    def get_frame_pose(self, frame_name):
+        """获取任意关节/link frame 在世界坐标系下的位姿.
+
+        供轨迹碰撞判定等用途: 沿仿真/实机轨迹对每个连杆求 FK,
+        检查到基座柱 / 地面的最小净距. ``update()`` 已调用
+        ``pin.updateFramePlacements``, 故 ``data.oMf`` 对所有 frame 有效.
+
+        :param str frame_name: URDF 中的 link/joint/frame 名称 (支持模糊匹配)
+        :returns: (p, R) — p: (3,), R: (3,3), 世界坐标系
+        """
+        self._ensure_updated()
+        if self.model.existFrame(frame_name):
+            fid = self.model.getFrameId(frame_name)
+        else:
+            matching = [f for f in self.model.frames
+                        if frame_name.lower() in f.name.lower()]
+            if not matching:
+                avail = ", ".join(f.name for f in self.model.frames[:20])
+                raise KeyError(f"frame '{frame_name}' 不存在. 可选: {avail}")
+            fid = self.model.getFrameId(matching[0].name)
+        oMf = self.data.oMf[fid]
+        return oMf.translation.copy(), oMf.rotation.copy()
+
     def get_joint_pose(self):
         """获取当前关节角度。
 

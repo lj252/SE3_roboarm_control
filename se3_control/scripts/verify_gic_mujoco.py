@@ -499,7 +499,31 @@ def urdf_joints_to_mujoco_xml(urdf_path, ee_frame_name='tool0',
                     if child_has_child:
                         add_body_chain(child_name, depth + 1)
                     else:
-                        lines.append(f'{inner_indent}<site name="end_effector" type="sphere" size="0.005" pos="0 0 0" rgba="1 0 0 1"/>')
+                        # 末端 site 放到 ee_frame 处: 沿末端固定关节链 (wrist_3-flange→flange-tool0)
+                        # 合成变换 (URDF 中 ee 常挂在最后一个 revolute 之后的固定关节上, 如 UR3 tool0 偏移).
+                        # 与 Pinocchio FK(ee_frame) 对齐; 无固定链 (leaf==ee) 时保持原行为 (零回归).
+                        ee_pos = np.zeros(3)
+                        ee_euler = np.zeros(3)
+                        if ee_frame_name != child_name:
+                            # 从 ee 沿 fixed 关节链 (child→parent) 反向走到 leaf; 天然 innermost-first,
+                            # 且按 child→parent 唯一路径走, 不会误入同父节点的旁支 (如 ur12e 的 ft_frame).
+                            chain_rev = []
+                            cur = ee_frame_name
+                            while cur in all_fixed_joints:
+                                jf = all_fixed_joints[cur]
+                                chain_rev.append(jf)
+                                cur = jf['parent']
+                            if cur == child_name and chain_rev:
+                                ee_R = np.eye(3)
+                                for jf in chain_rev:  # innermost-first: flange-tool0 → wrist_3-flange
+                                    R_j = rpy_to_rotmat(jf['rpy'])
+                                    ee_pos = R_j @ ee_pos + jf['xyz']
+                                    ee_R = R_j @ ee_R
+                                ee_euler = rotmat_to_xyz_euler(ee_R)
+                        ee_pos_str = f'{ee_pos[0]:.10f} {ee_pos[1]:.10f} {ee_pos[2]:.10f}'
+                        ee_euler_str = f'{ee_euler[0]:.10f} {ee_euler[1]:.10f} {ee_euler[2]:.10f}'
+                        lines.append(f'{inner_indent}<site name="end_effector" type="sphere" size="0.005" '
+                                     f'pos="{ee_pos_str}" euler="{ee_euler_str}" rgba="1 0 0 1"/>')
 
                     lines.append(f'{outer_indent}</body>')
 
@@ -546,7 +570,8 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
                      experiment='none',
                      decouple_force=10.0, decouple_moment=1.0,
                      decouple_settle=2.0, decouple_measure=1.0,
-                     decouple_loop=False, decouple_cycles=2):
+                     decouple_loop=False, decouple_cycles=2,
+                     task_cfg=None):
     """主验证循环.
 
     步骤:
@@ -556,8 +581,14 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
       4. 初始化轨迹
       5. 运行 GIC 控制循环
       6. 记录并分析结果
+
+    :param task_cfg: 按机器人合并的任务配置 (task_config.get_task_config(robot));
+                     None 时用模块默认 (ur3). 保证轨迹参数与 --robot 一致.
     """
     import mujoco
+
+    if task_cfg is None:
+        task_cfg = task_config
 
     # ── 1. 生成 MuJoCo 模型 ──
     urdf_path = os.path.join(URDF_DIR, robot_urdf)
@@ -665,10 +696,10 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
     else:
         # 动态任务: 从 config 读取参数生成轨迹
         # (直接使用 config 坐标, 不做偏移)
-        pd_t, Rd_t, dpd_t, dRd_t, ddpd_t, ddRd_t = build_trajectory(task, cfg=task_config)
+        pd_t, Rd_t, dpd_t, dRd_t, ddpd_t, ddRd_t = build_trajectory(task, cfg=task_cfg)
         if verbose:
             print(f"[Trajectory] start  = {pd_t(0).ravel()}")
-            print(f"[Trajectory] center = {getattr(task_config, task, {}).get('center', 'N/A')}")
+            print(f"[Trajectory] center = {getattr(task_cfg, task, {}).get('center', 'N/A')}")
 
         # ★ IK: 将机械臂摆到轨迹起点附近, 消除初始位置瞬态
         # 注意: IK 只用轨迹位置 + home 朝向 (因为轨迹朝向 Rd_default 与 home 差异大,
@@ -713,8 +744,8 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
     # ── 5. 控制器 ──
     controller = GICController(
         robot,
-        bandwidth=task_config.controller.get('bandwidth', 30.0),
-        damping=task_config.controller.get('damping', 1.0),
+        bandwidth=task_cfg.controller.get('bandwidth', 30.0),
+        damping=task_cfg.controller.get('damping', 1.0),
         torque_limits=torque_limits,
     )
 
@@ -746,7 +777,7 @@ def run_verification(robot_urdf, task='regulation', show_viewer=True,
     # ── 6. Viewer ──
     viewer = None
     # 从 config 读取轨迹可视化参数
-    trail_cfg = task_config.trail
+    trail_cfg = task_cfg.trail
     TRAIL_INTERVAL = trail_cfg.get('interval', 8)
     TRAIL_MAX = trail_cfg.get('max_points', 1200)
     TRAIL_SIZE = trail_cfg.get('sphere_size', 0.006)
@@ -1308,6 +1339,8 @@ if __name__ == '__main__':
         decouple_force=decouple_force, decouple_moment=decouple_moment,
         decouple_settle=decouple_settle, decouple_measure=decouple_measure,
         decouple_loop=decouple_loop, decouple_cycles=decouple_cycles,
+        # 按 --robot 匹配任务参数 (circle/line 几何与控制器)
+        task_cfg=task_config.get_task_config(args.robot),
     )
 
     # 绘图

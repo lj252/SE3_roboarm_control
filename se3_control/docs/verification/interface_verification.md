@@ -123,7 +123,7 @@ python3 tests/test_ur12e_hw_mock.py
 python3 tests/test_joint_states.py --ip 192.168.1.100 --duration 5
 
 # UR3
-python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.101 --duration 5
+python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.11 --duration 5
 ```
 
 **对接验证要点**:
@@ -143,7 +143,7 @@ python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.101 --duration 5
 python3 tests/test_gravity_comp.py --ip 192.168.1.100 --phase-a-duration 3
 
 # UR3
-python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 --phase-a-duration 3
+python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.11 --phase-a-duration 3
 ```
 
 **对接验证要点**:
@@ -162,7 +162,7 @@ python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 --phase-a-dura
 python3 tests/test_gravity_comp.py --ip 192.168.1.100 --phase-b-duration 10
 
 # UR3
-python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.101 --phase-b-duration 10
+python3 tests/test_gravity_comp.py --robot ur3 --ip 192.168.1.11 --phase-b-duration 10
 ```
 
 **对接验证要点**:

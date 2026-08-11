@@ -284,7 +284,8 @@
   <joint name="shoulder_pan_joint" type="revolute">
     <parent link="base_link_inertia"/>
     <child link="shoulder_link"/>
-    <origin rpy="0 0 0" xyz="0 0 0.1519"/>
+    <!-- 2026-08-11 基座校准: yaw 180° 使模型 FK 朝向与 RTDE 实机一致 (x 镜像对齐) -->
+    <origin rpy="0 0 3.141592653589793" xyz="0 0 0.1519"/>
     <axis xyz="0 0 1"/>
     <limit effort="56.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.141592653589793"/>
     <dynamics damping="0" friction="0"/>
@@ -351,8 +352,10 @@
   <!-- ROS-Industrial 'tool0' frame: all-zeros tool frame -->
   <link name="tool0"/>
   <joint name="flange-tool0" type="fixed">
-    <!-- default toolframe: X+ left, Y+ up, Z+ front -->
-    <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0 0 0"/>
+    <!-- default toolframe: X+ left, Y+ up, Z+ front
+         2026-08-11 基座校准: 沿 tool0 +z 下移 0.126 m (home 时 tool0 +z 竖直朝下 = 世界向下),
+         TCP 与法兰的偏移; 连杆保持标准高度 -->
+    <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0.126 0 0"/>
     <parent link="flange"/>
     <child link="tool0"/>
   </joint>

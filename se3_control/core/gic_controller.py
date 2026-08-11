@@ -94,8 +94,12 @@ class GICController:
         Vd = np.hstack((vd, wd)).reshape((-1, 1))
         dVd = np.hstack((dvd, dwd)).reshape((-1, 1))
 
+        # 当前体速度 Vb —— 供 dVd_star 中 d/dt(Ad_{g_ed}) 使用.
+        # adjoint_g_ed_deriv(g, gd, v, w, vd, wd) 的 (v,w) 槽位是当前体速度,
+        # (vd,wd) 才是期望速度; 修复前误把期望速度 vd/wd 传进当前速度槽位.
+        Vb = self.robot.get_body_ee_velocity()
         Vd_star = adjoint_g_ed(g_ed) @ Vd
-        dVd_star = (adjoint_g_ed_deriv(g, gd, vd, wd, dvd, dwd) @ Vd
+        dVd_star = (adjoint_g_ed_deriv(g, gd, Vb[:3], Vb[3:], vd, wd) @ Vd
                      + adjoint_g_ed(g_ed) @ dVd)
 
         # ── 4. SE(3) 误差 (体坐标系) ────────────────────────────
@@ -106,7 +110,6 @@ class GICController:
         e_op = np.vstack((e_pos, e_rot))
 
         # ── 5. 速度误差 ────────────────────────────────────────
-        Vb = self.robot.get_body_ee_velocity()
         ev = Vb - Vd_star
 
         # ── 6. 操作空间惯性 ────────────────────────────────────

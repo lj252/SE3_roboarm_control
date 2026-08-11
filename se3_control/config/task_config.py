@@ -1,110 +1,137 @@
 """
 任务轨迹参数配置文件
 ====================
-修改此文件中的参数即可改变圆/线轨迹的形状、位置、速度等。
 
-使用方式:
-  方式一: 修改此文件中的默认值
-  方式二: 在命令行指定配置文件路径 (后续支持)
+任务轨迹的形状、位置、速度等参数在此管理。
+
+**按机器人匹配**: 不同机械臂有不同的工作空间与安全位姿, 任务参数按机器人分开存放
+(``ROBOT_TASK_CONFIGS``)。实机入口 ``run_se3_control.py`` 用 ``--robot`` 自动匹配:
+
+    from config import task_config
+    cfg = task_config.get_task_config('ur3')      # → UR3 默认 (圆心低/近, 半径大些)
+    cfg = task_config.get_task_config('ur12e')    # → UR12e 默认 (高位安全, 缩小半径)
+
+仿真脚本 (verify_gic/gac_mujoco) 同样按 ``--robot`` 取对应默认值。
+
+模块级 ``circle`` / ``line`` / ``regulation`` 保留为**默认机器人 (ur3)** 的配置,
+供向后兼容 (build_trajectory 无 cfg 参数时的默认导入 / 直接引用)。
 
 所有长度单位: 米 (m)
 所有角度单位: 弧度 (rad)
 """
 
+import types
+
 # ═══════════════════════════════════════════════════════════
-# 圆轨迹 (Circle) 参数
+# 默认机器人 — 与 run_se3_control.py 的 --robot 默认值一致
 # ═══════════════════════════════════════════════════════════
-circle = {
-    # ── 位置 ──
-    # 圆心在世界坐标系中的位置 [x, y, z] (m)
-    # 注意: 之前的默认值 z=0.125 在新的绝对坐标模式下过低,
-    #       旧代码的偏移逻辑会无视这个值而平移到 home 位置.
-    #       现在建议设 z≈0.5~0.8 使轨迹处于合理高度.
-    #
-    # 小机械臂 (UR3) 推荐:
-      'center':  [0.35, 0.0, 0.3],
-      'radius':  0.08,          # 原 0.1
-      'speed':   0.8,           # 原 1.0
-    # 'center':         [0.50, 0.0, 0.6],
+DEFAULT_ROBOT = 'ur3'
 
-    # ── 大小 ──
-    # 圆的半径 (m)
-    # 'radius':         0.1,
 
-    # ── 速度 ──
-    # 角速度 (rad/s), omega 值, 即 cos(omega*t), sin(omega*t) 中的 omega
-    # 增大 = 画圆更快, 减小 = 画圆更慢
-    # 'speed':          1.0,
+# ═══════════════════════════════════════════════════════════
+# 机器人任务参数 — 每个机器人一套 circle/line/regulation 默认值
+# ═══════════════════════════════════════════════════════════
+ROBOT_TASK_CONFIGS = {
+    # ────────────────────────────────────────────────────────
+    # UR3 — 小机械臂, 工作空间小 (EE≈[-0.35,0,0.224], home 位姿)
+    # 2026-08-11 基座校准后坐标系与 RTDE 实机一致 (x 镜像 + z 低 0.126)
+    # ────────────────────────────────────────────────────────
+    'ur3': {
+        # ── 圆轨迹 (Circle) ──
+        'circle': {
+            # 圆心在世界坐标系中的位置 [x, y, z] (m)
+            # z 取 home 位姿 EE 高度 (≈0.224), 避免圆心过低导致臂一直向下够;
+            # x 前移到 -0.38 远离基部 + 半径缩到 0.06 → 内缩点 x=-0.32 (原 -0.27),
+            # 避免臂向基部收时肘/前臂贴近基座 (可达性/奇异已用 IK 预检验证)
+            'center':       [-0.38, 0.0, 0.224],
+            # 圆半径 (m)
+            'radius':       0.06,
+            # 角速度 (rad/s); 最大线速度 = radius×speed = 0.064 m/s
+            'speed':        0.8,
+            # 期望朝向, 9 个数字按行优先展开 3x3 旋转矩阵
+            # (UR12e/UR3 的 tool0 初始朝向, 使 EE 指向正下方; 已按基座 yaw180 更新)
+            'orientation':  [0, -1, 0,
+                             -1, 0, 0,
+                             0, 0, -1],
+        },
 
-    # ── 朝向 ──
-    # 末端执行器的期望姿态, 9 个数字按行优先展开 3x3 旋转矩阵:
-    #   [R00, R01, R02, R10, R11, R12, R20, R21, R22]
-    # 默认值对应 UR12e 的 tool0 初始朝向 (使 EE 指向正下方)
-    'orientation':    [0, 1, 0,
-                       1, 0, 0,
-                       0, 0, -1],
+        # ── 线轨迹 (Line) ──
+        'line': {
+            # 线段中点的世界坐标 [x, y, z] (m)
+            # z 同 circle, 取 home 位姿 EE 高度 (≈0.224); x 同 circle 前移远离基部
+            'center':       [-0.38, 0.0, 0.224],
+            # 振荡幅度 (m), 即从中心点向两端的最大偏移量; 线段总长 = 2×amplitude
+            'amplitude':    0.08,
+            # 振荡方向, 单位向量 [dx, dy, dz] (会自动归一化)
+            'direction':    [0, 1, 0],
+            # 角频率 (rad/s), sin(omega*t) 中的 omega; 最大线速度 = amp×omega = 0.032 m/s
+            'frequency':    0.4,
+            # 期望朝向 (同 circle)
+            'orientation':  [0, -1, 0,
+                             -1, 0, 0,
+                             0, 0, -1],
+        },
+
+        # ── 调节任务 (Regulation) ──
+        'regulation': {
+            # 期望位置 [x, y, z] (m)
+            # 注意: 调节任务实际以 home_q 的正运动学位姿为期望 (verify_*_mujoco.py),
+            #       此 target 仅作文档性参考, 保持与新 home (EE≈[-0.35,0,0.224]) 一致.
+            'target':       [-0.35, 0.0, 0.224],
+            # 期望朝向 (同 circle)
+            'orientation':  [0, -1, 0,
+                             -1, 0, 0,
+                             0, 0, -1],
+        },
+    },
+
+    # ────────────────────────────────────────────────────────
+    # UR12e — 大臂, 高位安全 (EE≈[0.50,0,0.50], home 位姿)
+    # 尺寸缩小 + 位置抬高, 降低实机活动范围
+    # ────────────────────────────────────────────────────────
+    'ur12e': {
+        # ── 圆轨迹 (Circle) ──
+        'circle': {
+            'center':       [0.50, 0.0, 0.50],   # 圆心取 home 位姿 (高位)
+            'radius':       0.05,                # 缩小: 降低活动范围
+            'speed':        0.8,                 # 最大线速度 = 0.04 m/s
+            'orientation':  [0, 1, 0,
+                             1, 0, 0,
+                             0, 0, -1],
+        },
+
+        # ── 线轨迹 (Line) ──
+        'line': {
+            'center':       [0.50, 0.0, 0.50],   # 中心取 home 位姿 (高位)
+            'amplitude':    0.05,                # 缩小: 原 z=0.05 贴近地面, 已抬高
+            'direction':    [0, 1, 0],
+            'frequency':    0.4,                 # 最大线速度 = 0.02 m/s
+            'orientation':  [0, 1, 0,
+                             1, 0, 0,
+                             0, 0, -1],
+        },
+
+        # ── 调节任务 (Regulation) ──
+        'regulation': {
+            'target':       [0.50, 0.0, 0.50],
+            'orientation':  [0, 1, 0,
+                             1, 0, 0,
+                             0, 0, -1],
+        },
+    },
 }
 
-# ═══════════════════════════════════════════════════════════
-# 线轨迹 (Line) 参数
-# ═══════════════════════════════════════════════════════════
-line = {
-    # ── 位置 ──
-    # 线段中点的世界坐标 [x, y, z] (m)
-    #
-    # 小机械臂 (UR3) 推荐:
-    #   'center':    [0.35, 0.0, 0.3],
-    #   'amplitude': 0.08,          # 原 0.125
-    #   'frequency': 0.4,           # 原 0.5
-    'center':         [0.50, 0.0, 0.05],
-
-    # ── 大小 ──
-    # 振荡幅度 (m), 即从中心点向两端的最大偏移量
-    # 线段总长 = 2 * amplitude
-    'amplitude':      0.125,
-
-    # ── 方向 ──
-    # 振荡方向, 单位向量 [dx, dy, dz] (会自动归一化)
-    #   [0,1,0]  = 沿 Y 轴 (左右)
-    #   [1,0,0]  = 沿 X 轴 (前后)
-    #   [0,0,1]  = 沿 Z 轴 (上下)
-    #   [1,1,0]  = 45° 对角线 (会自动归一化)
-    'direction':      [0, 1, 0],
-
-    # ── 速度 ──
-    # 角频率 (rad/s), sin(omega*t) 中的 omega
-    # 最大线速度 = amplitude * omega
-    # 默认 omega=0.5, amplitude=0.125 → 最大速度 0.0625 m/s
-    'frequency':      0.5,
-
-    # ── 朝向 ──
-    # 同 circle 的 orientation 说明
-    'orientation':    [0, 1, 0,
-                       1, 0, 0,
-                       0, 0, -1],
-}
 
 # ═══════════════════════════════════════════════════════════
-# 调节任务 (Regulation) 参数
+# 向后兼容: 模块级 circle/line/regulation = 默认机器人 (ur3) 配置
 # ═══════════════════════════════════════════════════════════
-regulation = {
-    # 期望位置 [x, y, z] (m)
-    #
-    # 注意: 调节任务实际以 home_q 的正运动学位姿为期望 (verify_*_mujoco.py),
-    # 此 target 仅作文档性参考, 保持与新 home (EE≈[0.50, 0, 0.50]) 一致.
-    #
-    # 小机械臂 (UR3) 推荐:
-    #   'target': [0.35, 0.0, 0.3],
-    'target':         [0.50, 0.0, 0.50],
+circle     = ROBOT_TASK_CONFIGS[DEFAULT_ROBOT]['circle']
+line       = ROBOT_TASK_CONFIGS[DEFAULT_ROBOT]['line']
+regulation = ROBOT_TASK_CONFIGS[DEFAULT_ROBOT]['regulation']
 
-    # 期望朝向 (同 circle 说明)
-    'orientation':    [0, 1, 0,
-                       1, 0, 0,
-                       0, 0, -1],
-}
 
 # ═══════════════════════════════════════════════════════════
-# GIC 控制器增益
+# GIC/GAC 控制器参数 — 两臂共享 (主要调带宽, 见 --bandwidth)
 # ═══════════════════════════════════════════════════════════
 gains = {
     # 调节任务 (regulation) 增益
@@ -200,3 +227,28 @@ experiments = {
         'cycles':  2,       # 完整循环轮数 (viewer 模式可提前关闭; no-viewer 时跑满)
     },
 }
+
+
+# ═══════════════════════════════════════════════════════════
+# 按机器人读取任务配置
+# ═══════════════════════════════════════════════════════════
+
+def get_task_config(robot: str = DEFAULT_ROBOT):
+    """返回按机器人合并后的任务配置对象 (namespace).
+
+    :param robot: 机器人类型 ('ur3' / 'ur12e'; 未匹配时回退默认)
+    :returns: 含 circle/line/regulation 任务参数 + gains/controller/trail/
+              simulation/experiments 共享参数的对象,
+              build_trajectory 可直接作为 cfg 传入.
+    """
+    robot_cfg = ROBOT_TASK_CONFIGS.get(robot, ROBOT_TASK_CONFIGS[DEFAULT_ROBOT])
+
+    ns = types.SimpleNamespace()
+    for task in ('circle', 'line', 'regulation'):
+        setattr(ns, task, dict(robot_cfg.get(task, {})))
+    ns.gains       = gains
+    ns.controller  = controller
+    ns.trail       = trail
+    ns.simulation  = simulation
+    ns.experiments = experiments
+    return ns

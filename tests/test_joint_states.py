@@ -20,7 +20,7 @@ Step 2: 关节状态读取验证 (q, dq)
 用法:
   conda activate roboarm
   python se3_control/scripts/test_joint_states.py [--ip 192.168.1.100] [--duration 5]
-  python se3_control/scripts/test_joint_states.py --robot ur3 --ip 192.168.1.101
+  python se3_control/scripts/test_joint_states.py --robot ur3 --ip 192.168.1.11
 """
 
 import argparse

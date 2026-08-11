@@ -7,7 +7,7 @@ UR3HW — UR3 具体硬件实现
 用法:
   from se3_control.hardware.ur3_hw import UR3HW
 
-  with UR3HW(ip="192.168.1.101") as robot:
+  with UR3HW(ip="192.168.1.11") as robot:
       q, dq = robot.get_joint_states()
 """
 
@@ -71,7 +71,7 @@ class UR3HW(URHW):
 
     def __init__(
         self,
-        ip: str = "192.168.1.101",
+        ip: str = "192.168.1.11",
         dt: float = _DEFAULT_DT,
         timeout: float = _DEFAULT_TIMEOUT,
         verbose: bool = True,
@@ -102,7 +102,7 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
     )
 
-    ip = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.101"
+    ip = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.11"
 
     print("=" * 60)
     print(f"UR3HW 自检 — 连接 {ip}")

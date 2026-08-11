@@ -21,7 +21,7 @@ Step 4: 简化 GIC 位置保持 (Regulation) 验证
 用法:
   conda activate roboarm
   python se3_control/scripts/test_regulation.py [--ip 192.168.1.100]
-  python se3_control/scripts/test_regulation.py --robot ur3 --ip 192.168.1.101
+  python se3_control/scripts/test_regulation.py --robot ur3 --ip 192.168.1.11
 
 安全:
   - 力矩限幅为 URDF 限位的 50%

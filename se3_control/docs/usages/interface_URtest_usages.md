@@ -47,7 +47,7 @@ python3 tests/test_joint_states.py
 python3 tests/test_joint_states.py --robot ur12e --ip 192.168.1.100
 
 # UR3
-python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.101
+python3 tests/test_joint_states.py --robot ur3 --ip 192.168.1.11
 ```
 
 ### 0.3 连接验证
@@ -96,7 +96,7 @@ conda activate roboarm
 python3 tests/test_joint_states.py
 
 # 指定 IP 和测试时长
-python3 tests/test_joint_states.py --ip 192.168.1.101 --duration 10
+python3 tests/test_joint_states.py --ip 192.168.1.11 --duration 10
 ```
 
 ### 1.3 参数
@@ -104,7 +104,7 @@ python3 tests/test_joint_states.py --ip 192.168.1.101 --duration 10
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--robot` | `ur12e` | 机械臂类型: `ur12e` / `ur3` |
-| `--ip` | ur12e: `192.168.1.100`<br>ur3: `192.168.1.101` | UR 控制箱 IP（默认从配置加载） |
+| `--ip` | ur12e: `192.168.1.100`<br>ur3: `192.168.1.11` | UR 控制箱 IP（默认从配置加载） |
 | `--duration` | `5.0` | 测试持续时间（秒） |
 | `--dt` | `0.004` | 读取周期（秒），对应 250 Hz |
 
@@ -171,7 +171,7 @@ python3 tests/test_gravity_comp.py --ip 192.168.1.100 --dt 0.004
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--robot` | `ur12e` | 机械臂类型: `ur12e` / `ur3` |
-| `--ip` | ur12e: `192.168.1.100`<br>ur3: `192.168.1.101` | UR 控制箱 IP（默认从配置加载） |
+| `--ip` | ur12e: `192.168.1.100`<br>ur3: `192.168.1.11` | UR 控制箱 IP（默认从配置加载） |
 | `--urdf` | 从配置自动加载 | URDF 文件路径（可手动覆盖） |
 | `--ee-frame` | 从配置自动加载 | 末端 frame 名称（可手动覆盖） |
 | `--phase-a-duration` | `3.0` | 零力矩阶段时长（秒） |
@@ -261,7 +261,7 @@ python3 tests/test_regulation.py \
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--robot` | `ur12e` | 机械臂类型: `ur12e` / `ur3` |
-| `--ip` | ur12e: `192.168.1.100`<br>ur3: `192.168.1.101` | UR 控制箱 IP（默认从配置加载） |
+| `--ip` | ur12e: `192.168.1.100`<br>ur3: `192.168.1.11` | UR 控制箱 IP（默认从配置加载） |
 | `--urdf` | 从配置自动加载 | URDF 文件路径（可手动覆盖） |
 | `--ee-frame` | 从配置自动加载 | 末端 frame 名称（可手动覆盖） |
 | `--duration` | `15.0` | 测试时长（秒） |

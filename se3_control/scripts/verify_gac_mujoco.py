@@ -641,7 +641,8 @@ def run_verification(robot_urdf, task='regulation',
                      experiment='none',
                      decouple_force=10.0, decouple_moment=1.0,
                      decouple_settle=2.0, decouple_measure=1.0,
-                     decouple_loop=False, decouple_cycles=2):
+                     decouple_loop=False, decouple_cycles=2,
+                     task_cfg=None):
     """GAC 控制验证主循环.
 
     步骤:
@@ -654,6 +655,9 @@ def run_verification(robot_urdf, task='regulation',
       7. 记录并分析结果
     """
     import mujoco
+
+    if task_cfg is None:
+        task_cfg = task_config
 
     # ── 1. 生成 MuJoCo 模型 ──
     urdf_path = os.path.join(URDF_DIR, robot_urdf)
@@ -774,7 +778,7 @@ def run_verification(robot_urdf, task='regulation',
             ddpd_t=_zero3, ddRd_t=_zero33,
         )
     else:
-        traj_funcs = build_trajectory(task)
+        traj_funcs = build_trajectory(task, cfg=task_cfg)
         if verbose:
             print(f"[Trajectory] start = {traj_funcs.pd_t(0).ravel()}")
 
@@ -876,7 +880,7 @@ def run_verification(robot_urdf, task='regulation',
 
     # ── 8. Viewer ──
     viewer = None
-    trail_cfg = task_config.trail
+    trail_cfg = task_cfg.trail
     TRAIL_INTERVAL = trail_cfg.get('interval', 8)
     TRAIL_MAX = trail_cfg.get('max_points', 1200)
     TRAIL_SIZE = trail_cfg.get('sphere_size', 0.006)
@@ -1582,6 +1586,8 @@ if __name__ == '__main__':
         decouple_force=decouple_force, decouple_moment=decouple_moment,
         decouple_settle=decouple_settle, decouple_measure=decouple_measure,
         decouple_loop=decouple_loop, decouple_cycles=decouple_cycles,
+        # 按 --robot 匹配任务参数 (circle/line 几何)
+        task_cfg=task_config.get_task_config(args.robot),
     )
 
     # 绘图

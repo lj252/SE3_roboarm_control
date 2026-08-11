@@ -1,1035 +1,850 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SE(3) 几何控制在 MuJoCo 仿真中的主入口
-=========================================
+run_se3_control.py — SE(3) 几何控制实机执行入口
+=================================================
 
-基于已抽离的 core/ 模块（se3_math / trajectory / gic_controller）运行
-MuJoCo 物理仿真验证。支持 regulation / circle / line 任务与多机器人。
+定位
+----
+本脚本是 SE(3) 控制在**真实机械臂**上的统一入口。
+所有**仿真**实验统一走 verify_gic_mujoco.py / verify_gac_mujoco.py（MuJoCo 物理推演）；
+本脚本不做仿真，直接连接硬件（UR3 / UR12e），以 250 Hz 闭环运行
+**完整 GICController**（自适应操作空间惯性整形 + 重力补偿）。
 
-用法:
+架构
+----
+  run_se3_control.py   (实机编排: 连接 / 安全检查 / 相位状态机 / 轨迹求值 / 记录 / 停机)
+       │  仅做编排, 不含任何控制律 / 运动学数学
+       ▼
+  core/gic_controller.py    — GIC 控制律 (GICController.compute, 自适应 M̃)
+  core/trajectory.py        — 轨迹生成 (build_trajectory) + 体速度求值 (eval_body_twist)
+  core/se3_math.py          — SE(3) 数学 (rotmat_slerp / vee_map / hat_map)
+  robot_model/robot_model.py — Pinocchio FK / Jb / M / 重力补偿 / 高斯-牛顿 IK
+       ▼
+  hardware/ur3_hw.py (UR3HW, ur_rtde) — q/dq 读取 + directTorque 发力矩
+
+任务
+----
+  regulation — 位置保持 (Phase 0 低增益自检 → Phase 2 主保持)
+  circle/line — 轨迹跟踪 (Phase 0 自检 → Phase 2 跟踪; 含 IK 可达性预检 + 起步混合)
+
+轨迹跟踪要点 (实机, 区别于仿真)
+--------------------------------
+  1. 真实时间求值: 轨迹在 t_real (wait_next_cycle 累加的真实经过时间) 处求值,
+     而非仿真名义步长 i·dt.
+  2. 起步混合 (--blend-time): 实机无法像仿真那样先 IK 摆位, 前 blend_time 秒从
+     当前位姿平滑过渡到轨迹起点 (位置 lerp + 朝向 slerp), 前馈速度按 bf 缩放,
+     避免起始位姿差造成力矩跳变.
+  3. IK 可达性预检: 运行前采样轨迹点做高斯-牛顿 IK, 检查收敛 / 关节限位 / 奇异.
+
+用法
+----
   conda activate roboarm
-  cd se3_control
+  cd /media/lj252/Data/catkin_ws/roboarm_test/SE3_roboarm_control
 
-  # 默认: 可视化 + UR12e + 调节任务
-  python scripts/run_se3_control.py
+  # 任务几何参数按 --robot 自动匹配 (config/task_config.py ROBOT_TASK_CONFIGS):
+  #   --robot ur3   → circle 圆心 [-0.38,0,0.224] / r0.06; line 中点 [-0.38,0,0.224] / amp0.08
+  #   --robot ur12e → circle 圆心 [0.50,0,0.50] / r0.05; line 中点 [0.50,0,0.50] / amp0.05 (高位安全)
 
-  # 指定任务与机器人
-  python scripts/run_se3_control.py --robot ur3 --task circle
+  # UR3 画圆 (radius=0.06, speed=0.8, 中心 [-0.38,0,0.224]; UR3 默认 IP .11)
+  python se3_control/scripts/run_se3_control.py --robot ur3 --task circle \
+      --duration 16 --bandwidth 20
 
-  # 无头模式 (SSH/服务器)
-  python scripts/run_se3_control.py --task circle --no-viewer
+  # UR3 线轨迹 (amplitude=0.08, frequency=0.4, 中点 [-0.38,0,0.224])
+  python se3_control/scripts/run_se3_control.py --robot ur3 --task line \
+      --duration 16 --bandwidth 20
 
-  # 保存结果图
-  python scripts/run_se3_control.py --task circle --save-plot circle.png
+  # 命令行自定义圆心/半径 (仅 circle/line; 覆盖后同样走 IK 可达性预检,
+  # 圆心太远/不可达会预检报错中止, 不会先动臂)
+  python se3_control/scripts/run_se3_control.py --robot ur3 --task circle \
+      --center -0.40 0.0 0.224 --radius 0.05
 
-  # 仅做模型交叉验证 (不运行控制)
-  python scripts/run_se3_control.py --cross-validate
+  # ★ 上真机前先 --preview: 不连接硬件, 用同一参数在 MuJoCo 里跑闭环仿真,
+  #   实时看臂的轨迹 (红色 trail) + 自动碰撞判定 (基座柱/地面净距, ✓/✗).
+  #   预览通过后再去掉 --preview 上真机 — 反复"撞"的问题先用预览排查.
+  python se3_control/scripts/run_se3_control.py --robot ur3 \
+      --control-mode servoJ --task circle --duration 16 --bandwidth 10 --preview
+  #   自定义圆心/半径预览 (与实机命令一致, 只是加 --preview)
+  python se3_control/scripts/run_se3_control.py --robot ur3 --task circle \
+      --center -0.40 0.0 0.224 --radius 0.05 --preview --no-viewer
+  #   真机当前位形不是 home (臂已折叠/低位) 时, 用 --dry-run 读当前 q 传入,
+  #   让预览从真实起步位形开始 (混合路径才真实)
+  python se3_control/scripts/run_se3_control.py --robot ur3 --task circle \
+      --preview --preview-start-q -0.327 -0.6 2.4 -1.386 -1.571 2.738
 
-架构:
-  run_se3_control.py  (仿真入口 — URDF→XML, MuJoCo 步进, 可视化, 记录)
-       ↓ 使用
-  core/trajectory.py       — 轨迹生成
-  core/gic_controller.py   — GIC 控制律
-  core/se3_math.py         — SE(3) 数学工具
-       ↓ 使用
-  robot_model/robot_model.py  (Pinocchio 封装)
+  # 干跑: 连接 + FK 自检, 不发任何力矩
+  python se3_control/scripts/run_se3_control.py --robot ur3 --dry-run
+
+  # 记录数据到 npz (供实验分析)
+  python se3_control/scripts/run_se3_control.py --robot ur3 \
+      --task circle --save-log circle_ur3.npz
+
+  # UR12e 位置保持 (UR12e 默认 IP .100; 大臂建议先 --torque-scale 0.3 降矩)
+  python se3_control/scripts/run_se3_control.py --robot ur12e --torque-scale 0.3
+
+  # 调试: 跳过 Phase 0 低带宽自检, 直接进入主阶段 (排查"一启动就急停"时用)
+  python se3_control/scripts/run_se3_control.py --robot ur3 --task circle \
+      --duration 16 --bandwidth 20 --skip-phase0
+
+安全
+----
+  - 力矩限幅 = URDF effort 的 50% (可再 --torque-scale 降)
+  - 相位状态机: Phase 0 低增益自检 → Phase 2 主阶段 → Phase 3 停机
+    (--skip-phase0 时跳过 Phase 0, 直接主阶段)
+  - 每控制周期检查错误状态, 异常/急停自动 emergency_stop
+  - 启动前需按 Enter 确认; 结束停机前需再按 Enter 释放 (避免臂突然失去重力补偿)
+  - 急停 / Ctrl+C 随时可用
 """
 
+import argparse
+import logging
 import os
 import sys
 import time
-import argparse
-import xml.etree.ElementTree as ET
+from pathlib import Path
+
 import numpy as np
 
 # ─── 路径设置 ──────────────────────────────────────────────────────────
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SCRIPT_DIR)   # se3_control/
-sys.path.insert(0, PROJECT_DIR)
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent              # se3_control/
+sys.path.insert(0, str(PROJECT_DIR))
 
-# 导入核心模块
-from core.se3_math import (
-    vee_map, hat_map, rpy_to_rotmat, rotmat_to_xyz_euler,
-    rotmat_slerp,
-)
-from core.trajectory import build_trajectory
-from core.gic_controller import GICController
-
-# 导入机器人模型
+from config.robot_configs import get_robot_config, get_urdf_path, get_hw_class
 from robot_model.robot_model import RobotModel
-
-# 导入配置
-from config import task_config
-from config.robot_configs import get_robot_config, get_mesh_dir
-
-URDF_DIR = os.path.join(PROJECT_DIR, 'urdf')
-
-
-# ====================================================================
-# 1. URDF → MuJoCo XML 转换
-# ====================================================================
-
-def urdf_rpy_to_mjcf_euler(rpy):
-    """URDF RPY → MJCF euler (eulerseq='xyz') 转换."""
-    R = rpy_to_rotmat(rpy)
-    return rotmat_to_xyz_euler(R)
-
-
-def parse_urdf_kinematics(urdf_path, debug=False):
-    """解析 URDF, 提取运动学树 (仅主线关节链).
-
-    返回:
-      joints: list of dict — 排序后的 revolute/continuous 关节
-      links: 所有 link 名称集合
-      ee_link: 默认末端 link
-    """
-    tree = ET.parse(urdf_path)
-    root = tree.getroot()
-
-    links = {link.get('name') for link in root.findall('link')}
-
-    joints = []
-    for joint in root.findall('joint'):
-        name = joint.get('name')
-        jtype = joint.get('type')
-
-        parent = joint.find('parent').get('link')
-        child = joint.find('child').get('link')
-
-        origin = joint.find('origin')
-        if origin is not None:
-            xyz_str = origin.get('xyz', '0 0 0')
-            rpy_str = origin.get('rpy', '0 0 0')
-            origin_xyz = np.array([float(v) for v in xyz_str.split()])
-            origin_rpy = np.array([float(v) for v in rpy_str.split()])
-        else:
-            origin_xyz = np.zeros(3)
-            origin_rpy = np.zeros(3)
-
-        axis_el = joint.find('axis')
-        if axis_el is not None:
-            axis_str = axis_el.get('xyz', '1 0 0')
-            axis_xyz = np.array([float(v) for v in axis_str.split()])
-        else:
-            axis_xyz = np.array([1, 0, 0])
-
-        limit = joint.find('limit')
-        if limit is not None:
-            lower = float(limit.get('lower', -3.14))
-            upper = float(limit.get('upper', 3.14))
-            effort = float(limit.get('effort', 100))
-            velocity = float(limit.get('velocity', 3.14))
-        else:
-            lower, upper = -3.14, 3.14
-            effort, velocity = 100, 3.14
-
-        joints.append({
-            'name': name, 'type': jtype,
-            'parent': parent, 'child': child,
-            'origin_xyz': origin_xyz, 'origin_rpy': origin_rpy,
-            'axis_xyz': axis_xyz,
-            'lower': lower, 'upper': upper,
-            'effort': effort, 'velocity': velocity,
-        })
-
-    # 主线关节链 (revolute + continuous)
-    rev_joints = [j for j in joints if j['type'] in ('revolute', 'continuous')]
-
-    all_children = set()
-    child_to_parent = {}
-    for j in joints:
-        all_children.add(j['child'])
-        child_to_parent[j['child']] = j['parent']
-
-    all_parents = {j['parent'] for j in joints}
-    root_link = next(iter(all_parents - all_children), 'world')
-
-    current = root_link
-    rev_parents = {j['parent'] for j in rev_joints}
-    while current not in rev_parents:
-        found_fixed = False
-        for j in joints:
-            if j['parent'] == current and j['type'] == 'fixed':
-                current = j['child']
-                found_fixed = True
-                break
-        if not found_fixed:
-            break
-
-    parent_to_rev_joint = dict((j['parent'], j) for j in rev_joints)
-    sorted_joints = []
-    first_rev = None
-    for j in rev_joints:
-        if j['parent'] == current:
-            first_rev = j
-            break
-
-    if first_rev is not None:
-        sorted_joints.append(first_rev)
-        current = first_rev['child']
-        while current in parent_to_rev_joint:
-            j = parent_to_rev_joint[current]
-            sorted_joints.append(j)
-            current = j['child']
-
-    if debug:
-        print(f"[URDF] root: {root_link}")
-        print(f"[URDF] revolute chain: {[j['name'] for j in sorted_joints]}")
-
-    ee_link = sorted_joints[-1]['child'] if sorted_joints else None
-    return sorted_joints, links, ee_link
-
-
-def urdf_joints_to_mujoco_xml(urdf_path, ee_frame_name='tool0',
-                               timestep=0.001, gravity=np.array([0, 0, -9.81]),
-                               link_to_mesh=None, mesh_subdir='',
-                               debug=False):
-    """将 URDF 关节链转换为 MuJoCo XML 字符串."""
-    joints, links, _ = parse_urdf_kinematics(urdf_path, debug)
-
-    # 解析惯性数据
-    tree = ET.parse(urdf_path)
-    root = tree.getroot()
-    inertia_data = {}
-    for link_el in root.findall('link'):
-        name = link_el.get('name')
-        inertial = link_el.find('inertial')
-        if inertial is not None:
-            mass = float(inertial.find('mass').get('value', 0))
-            origin = inertial.find('origin')
-            com_xyz = origin.get('xyz', '0 0 0') if origin is not None else '0 0 0'
-            com_rpy = origin.get('rpy', '0 0 0') if origin is not None else '0 0 0'
-
-            inertia_el = inertial.find('inertia')
-            if inertia_el is not None:
-                ixx = float(inertia_el.get('ixx', 0))
-                iyy = float(inertia_el.get('iyy', 0))
-                izz = float(inertia_el.get('izz', 0))
-                ixy = float(inertia_el.get('ixy', 0))
-                ixz = float(inertia_el.get('ixz', 0))
-                iyz = float(inertia_el.get('iyz', 0))
-            else:
-                ixx = iyy = izz = ixy = ixz = iyz = 0
-
-            inertia_data[name] = {
-                'mass': mass, 'com': com_xyz, 'com_rpy': com_rpy,
-                'ixx': ixx, 'iyy': iyy, 'izz': izz,
-                'ixy': ixy, 'ixz': ixz, 'iyz': iyz,
-            }
-
-    # 解析网格 origin
-    mesh_origins = {}
-    for link_el in root.findall('link'):
-        name = link_el.get('name')
-        origin = link_el.find('collision')
-        if origin is None:
-            origin = link_el.find('visual')
-        if origin is not None:
-            origin = origin.find('origin')
-        if origin is not None:
-            mesh_origins[name] = {
-                'xyz': origin.get('xyz', '0 0 0'),
-                'rpy': origin.get('rpy', '0 0 0'),
-            }
-
-    def rotate_inertia_to_body(rpy, ixx, iyy, izz, ixy, ixz, iyz):
-        R = rpy_to_rotmat(rpy)
-        I_inertial = np.array([[ixx, ixy, ixz],
-                               [ixy, iyy, iyz],
-                               [ixz, iyz, izz]])
-        I_body = R @ I_inertial @ R.T
-        return (I_body[0, 0], I_body[1, 1], I_body[2, 2],
-                I_body[0, 1], I_body[0, 2], I_body[1, 2])
-
-    LINK_TO_MESH = link_to_mesh or {
-        'base_link_inertia': 'base_vis',
-        'shoulder_link': 'shoulder_vis',
-        'upper_arm_link': 'upperarm_vis',
-        'forearm_link': 'forearm_vis',
-        'wrist_1_link': 'wrist1_vis',
-        'wrist_2_link': 'wrist2_vis',
-        'wrist_3_link': 'wrist3_vis',
-    }
-
-    mesh_eulers = {}
-    for ln, mo in mesh_origins.items():
-        rpy_arr = np.array([float(v) for v in mo['rpy'].split()])
-        mesh_eulers[ln] = urdf_rpy_to_mjcf_euler(rpy_arr)
-
-    indent = '  '
-    lines = []
-    lines.append('<?xml version="1.0"?>')
-    lines.append(f'<mujoco model="urdf_converted">')
-    mesh_dir = os.path.abspath(os.path.join(
-        os.path.dirname(urdf_path), 'meshes', mesh_subdir))
-    lines.append(f'{indent}<compiler angle="radian" coordinate="local" '
-                 f'meshdir="{mesh_dir}/"/>')
-    lines.append(f'{indent}<option timestep="{timestep}" '
-                 f'gravity="{gravity[0]} {gravity[1]} {gravity[2]}" '
-                 f'impratio="10"/>')
-
-    lines.append(f'{indent}<default>')
-    lines.append(f'{indent*2}<geom type="mesh" contype="0" conaffinity="0" '
-                 f'rgba="0.737 0.737 0.768 1"/>')
-    lines.append(f'{indent}</default>')
-
-    lines.append(f'{indent}<asset>')
-    for link_name, mesh_name in LINK_TO_MESH.items():
-        lines.append(f'{indent*2}<mesh name="{mesh_name}" file="{mesh_name}.stl"/>')
-    lines.append(f'{indent}</asset>')
-
-    lines.append(f'{indent}<worldbody>')
-    lines.append(f'{indent*2}<light directional="true" diffuse=".8 .8 .8" '
-                 f'pos="0 0 5" dir="1.5 1 -2"/>')
-    lines.append(f'{indent*2}<geom name="floor" pos="0 0 -0.5" '
-                 f'size="2 2 0.5" type="plane" condim="1"/>')
-
-    if joints:
-        root_body = joints[0]['parent']
-        tree_fixed = ET.parse(urdf_path)
-        root_fixed = tree_fixed.getroot()
-        all_fixed_joints = {}
-        for joint_el in root_fixed.findall('joint'):
-            if joint_el.get('type') == 'fixed':
-                parent = joint_el.find('parent').get('link')
-                child = joint_el.find('child').get('link')
-                origin_el = joint_el.find('origin')
-                if origin_el is not None:
-                    xyz = np.array([float(v) for v in
-                                    origin_el.get('xyz', '0 0 0').split()])
-                    rpy = np.array([float(v) for v in
-                                    origin_el.get('rpy', '0 0 0').split()])
-                else:
-                    xyz, rpy = np.zeros(3), np.zeros(3)
-                all_fixed_joints[child] = {
-                    'parent': parent, 'xyz': xyz, 'rpy': rpy,
-                }
-
-        root_pos = np.zeros(3)
-        root_rpy = np.zeros(3)
-        current_link = root_body
-        chain_rev = []
-        while current_link in all_fixed_joints:
-            j = all_fixed_joints[current_link]
-            chain_rev.append(j)
-            current_link = j['parent']
-        for j in reversed(chain_rev):
-            R_j = rpy_to_rotmat(j['rpy'])
-            root_pos = R_j @ root_pos + j['xyz']
-            R_current = rpy_to_rotmat(root_rpy)
-            R_new = R_j @ R_current
-            root_rpy = rotmat_to_xyz_euler(R_new)
-
-        root_pos_str = (f'{root_pos[0]:.10f} {root_pos[1]:.10f} '
-                        f'{root_pos[2]:.10f}')
-        root_rpy_str = (f'{root_rpy[0]:.10f} {root_rpy[1]:.10f} '
-                        f'{root_rpy[2]:.10f}')
-        lines.append(f'{indent*2}<body name="{root_body}" '
-                     f'pos="{root_pos_str}" euler="{root_rpy_str}">')
-        if root_body in inertia_data and inertia_data[root_body]['mass'] > 0:
-            d = inertia_data[root_body]
-            com_rpy = [float(v) for v in d['com_rpy'].split()]
-            ixx_b, iyy_b, izz_b, ixy_b, ixz_b, iyz_b = rotate_inertia_to_body(
-                com_rpy, d['ixx'], d['iyy'], d['izz'],
-                d['ixy'], d['ixz'], d['iyz'])
-            lines.append(f'{indent*3}<inertial mass="{d["mass"]}" '
-                         f'pos="{d["com"]}" '
-                         f'fullinertia="{ixx_b} {iyy_b} {izz_b} '
-                         f'{ixy_b} {ixz_b} {iyz_b}"/>')
-
-        base_mesh = LINK_TO_MESH.get(root_body)
-        if base_mesh and root_body in mesh_origins:
-            mo = mesh_origins[root_body]
-            me = mesh_eulers.get(root_body)
-            if me is not None:
-                euler_str = f'{me[0]:.10f} {me[1]:.10f} {me[2]:.10f}'
-                lines.append(f'{indent*3}<geom type="mesh" mesh="{base_mesh}" '
-                             f'pos="{mo["xyz"]}" euler="{euler_str}"/>')
-            else:
-                lines.append(f'{indent*3}<geom type="mesh" mesh="{base_mesh}" '
-                             f'pos="{mo["xyz"]}"/>')
-
-        def add_body_chain(parent_name, depth=3):
-            nonlocal lines
-            for j in joints:
-                if j['parent'] != parent_name:
-                    continue
-                child_name = j['child']
-                pos_str = (f'{j["origin_xyz"][0]:.10f} '
-                           f'{j["origin_xyz"][1]:.10f} '
-                           f'{j["origin_xyz"][2]:.10f}')
-                mjcf_euler = urdf_rpy_to_mjcf_euler(j['origin_rpy'])
-                euler_str = (f'{mjcf_euler[0]:.10f} '
-                             f'{mjcf_euler[1]:.10f} '
-                             f'{mjcf_euler[2]:.10f}')
-                axis_str = (f'{j["axis_xyz"][0]:.10f} '
-                            f'{j["axis_xyz"][1]:.10f} '
-                            f'{j["axis_xyz"][2]:.10f}')
-                range_str = f'{j["lower"]:.10f} {j["upper"]:.10f}'
-
-                outer_indent = indent * depth
-                inner_indent = indent * (depth + 1)
-
-                lines.append(f'{outer_indent}<body name="{child_name}" '
-                             f'pos="{pos_str}" euler="{euler_str}">')
-
-                if child_name in inertia_data and inertia_data[child_name]['mass'] > 0:
-                    d = inertia_data[child_name]
-                    com_rpy_v = [float(v) for v in d['com_rpy'].split()]
-                    ixx_b, iyy_b, izz_b, ixy_b, ixz_b, iyz_b = \
-                        rotate_inertia_to_body(
-                            com_rpy_v, d['ixx'], d['iyy'], d['izz'],
-                            d['ixy'], d['ixz'], d['iyz'])
-                    lines.append(f'{inner_indent}<inertial mass="{d["mass"]}" '
-                                 f'pos="{d["com"]}" '
-                                 f'fullinertia="{ixx_b} {iyy_b} {izz_b} '
-                                 f'{ixy_b} {ixz_b} {iyz_b}"/>')
-
-                lines.append(f'{inner_indent}<joint name="{j["name"]}" '
-                             f'type="hinge" axis="{axis_str}" '
-                             f'range="{range_str}"/>')
-
-                mesh_name = LINK_TO_MESH.get(child_name)
-                if mesh_name and child_name in mesh_origins:
-                    mo = mesh_origins[child_name]
-                    me = mesh_eulers.get(child_name)
-                    if me is not None:
-                        me_str = (f'{me[0]:.10f} {me[1]:.10f} {me[2]:.10f}')
-                        lines.append(
-                            f'{inner_indent}<geom type="mesh" '
-                            f'mesh="{mesh_name}" pos="{mo["xyz"]}" '
-                            f'euler="{me_str}"/>')
-                    else:
-                        lines.append(
-                            f'{inner_indent}<geom type="mesh" '
-                            f'mesh="{mesh_name}" pos="{mo["xyz"]}"/>')
-
-                if any(j2['parent'] == child_name for j2 in joints):
-                    add_body_chain(child_name, depth + 1)
-                else:
-                    lines.append(
-                        f'{inner_indent}<site name="end_effector" '
-                        f'type="sphere" size="0.005" pos="0 0 0" '
-                        f'rgba="1 0 0 1"/>')
-
-                lines.append(f'{outer_indent}</body>')
-
-        add_body_chain(root_body)
-        lines.append(f'{indent*2}</body>')
-
-    lines.append(f'{indent}</worldbody>')
-    lines.append(f'{indent}<actuator>')
-    for j in joints:
-        lines.append(f'{indent*2}<motor name="{j["name"]}_actuator" '
-                     f'joint="{j["name"]}" gear="1" ctrllimited="false" '
-                     f'ctrlrange="-1e6 1e6"/>')
-    lines.append(f'{indent}</actuator>')
-    lines.append('</mujoco>')
-
-    return '\n'.join(lines)
+from core.gic_controller import GICController
+from core.servo_bridge import ServoJTorqueBridge
+from core.trajectory import build_trajectory, eval_body_twist, TrajectoryFuncs
+from core.se3_math import rotmat_slerp
+from core.arm_log import ArmCsvLogger, arm_log_row
 
 
 # ====================================================================
-# 2. 绘图与结果分析
+# 1. 命令行参数
 # ====================================================================
 
-def plot_results(log, save_path=None):
-    """绘制跟踪性能图."""
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print(f"[Plot] matplotlib not available")
-        print(f"  Final pos_err: {log['pos_err'][-1]:.6f}")
-        print(f"  Max  pos_err: {np.max(log['pos_err']):.6f}")
-        print(f"  Final rot_err: {log['rot_err'][-1]:.6f}")
-        print(f"  Max  rot_err: {np.max(log['rot_err']):.6f}")
-        return
-
-    t = log['t']
-    nv = log['q'].shape[1]
-
-    fig, axes = plt.subplots(3, 2, figsize=(14, 10))
-    fig.suptitle('GIC Control - MuJoCo Simulation', fontsize=14)
-
-    # 1. 位置跟踪
-    ax = axes[0, 0]
-    ax.plot(t, log['p'][:, 0], 'b-', label='x', lw=1)
-    ax.plot(t, log['p'][:, 1], 'g-', label='y', lw=1)
-    ax.plot(t, log['p'][:, 2], 'r-', label='z', lw=1)
-    ax.plot(t, log['pd'][:, 0], 'b--', label='x_des', lw=0.5, alpha=0.5)
-    ax.plot(t, log['pd'][:, 1], 'g--', label='y_des', lw=0.5, alpha=0.5)
-    ax.plot(t, log['pd'][:, 2], 'r--', label='z_des', lw=0.5, alpha=0.5)
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('Position [m]')
-    ax.set_title('End-Effector Position Tracking')
-    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
-
-    # 2. 朝向误差
-    ax = axes[0, 1]
-    angle_err = np.zeros(len(t))
-    for i in range(len(t)):
-        R_err = log['R'][i].T @ log['Rd'][i]
-        cos_angle = (np.trace(R_err) - 1) / 2
-        angle_err[i] = np.arccos(np.clip(cos_angle, -1, 1))
-    ax.plot(t, angle_err, 'm-', lw=1)
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('Orientation Error [rad]')
-    ax.set_title('Orientation Tracking Error')
-    ax.grid(True, alpha=0.3)
-
-    # 3. 位置误差范数
-    ax = axes[1, 0]
-    ax.plot(t, log['pos_err'], 'b-', lw=1)
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('||pos_err|| [m]')
-    ax.set_title('Position Error Norm')
-    ax.grid(True, alpha=0.3)
-
-    # 4. 旋转误差范数
-    ax = axes[1, 1]
-    ax.plot(t, log['rot_err'], 'r-', lw=1)
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('||rot_err||')
-    ax.set_title('Rotation Error Norm')
-    ax.grid(True, alpha=0.3)
-
-    # 5. 关节力矩
-    ax = axes[2, 0]
-    for j in range(nv):
-        ax.plot(t, log['tau'][:, j], label=f'τ_{j}', lw=0.8)
-    ax.set_xlabel('Time [s]'); ax.set_ylabel('Torque [Nm]')
-    ax.set_title('Joint Torques')
-    ax.legend(fontsize=7, ncol=2); ax.grid(True, alpha=0.3)
-
-    # 6. 3D 轨迹
-    ax = fig.add_subplot(3, 2, 6, projection='3d')
-    ax.plot(log['pd'][:, 0], log['pd'][:, 1], log['pd'][:, 2],
-            'g--', label='desired', lw=1, alpha=0.7)
-    ax.plot(log['p'][:, 0], log['p'][:, 1], log['p'][:, 2],
-            'b-', label='actual', lw=1)
-    ax.scatter(log['p'][0, 0], log['p'][0, 1], log['p'][0, 2],
-               c='r', s=30, label='start')
-    ax.scatter(log['p'][-1, 0], log['p'][-1, 1], log['p'][-1, 2],
-               c='k', s=30, label='end')
-    ax.set_xlabel('X [m]'); ax.set_ylabel('Y [m]'); ax.set_zlabel('Z [m]')
-    ax.set_title('3D Trajectory')
-    ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"[Plot] Saved to {save_path}")
-
-    print(f"\n{'='*50}")
-    print("Simulation Summary:")
-    print(f"  Mean pos_err: {np.mean(log['pos_err']):.6f} m")
-    print(f"  Max  pos_err: {np.max(log['pos_err']):.6f} m")
-    print(f"  Final pos_err: {log['pos_err'][-1]:.6f} m")
-    print(f"  Mean rot_err: {np.mean(log['rot_err']):.6f}")
-    print(f"  Max  rot_err: {np.max(log['rot_err']):.6f}")
-    print(f"  Mean |tau|: {np.mean(np.linalg.norm(log['tau'], axis=1)):.2f} Nm")
-    print(f"{'='*50}")
-
-
-# ====================================================================
-# 3. 主仿真循环
-# ====================================================================
-
-def run_simulation(robot_urdf, task='regulation', show_viewer=True,
-                   max_time=5.0, home_q=None, ee_frame='tool0',
-                   link_to_mesh=None, mesh_subdir='',
-                   torque_limits=None, bandwidth=None, damping=None,
-                   verbose=True, stop_at_end=True, loop=False):
-    """GIC 控制 MuJoCo 仿真主循环.
-
-    步骤:
-      1. 从 URDF 生成 MuJoCo 模型
-      2. 加载 RobotModel (Pinocchio, 从相同 URDF)
-      3. 初始化仿真与轨迹
-      4. 运行 GIC 控制循环
-      5. 记录并分析结果
-    """
-    import mujoco
-
-    # ── 1. 生成 MuJoCo 模型 ──
-    urdf_path = os.path.join(URDF_DIR, robot_urdf)
-    if not os.path.exists(urdf_path):
-        urdf_path = robot_urdf
-    if not os.path.exists(urdf_path):
-        raise FileNotFoundError(f"Cannot find URDF: {urdf_path}")
-
-    xml_str = urdf_joints_to_mujoco_xml(
-        urdf_path, ee_frame,
-        link_to_mesh=link_to_mesh,
-        mesh_subdir=mesh_subdir,
-        debug=verbose,
-    )
-
-    import tempfile
-    tmpf = tempfile.NamedTemporaryFile(suffix='.xml', mode='w', delete=False)
-    tmpf.write(xml_str)
-    tmpf.close()
-
-    if verbose:
-        print(f"[MuJoCo XML] written to {tmpf.name}")
-
-    try:
-        model = mujoco.MjModel.from_xml_path(tmpf.name)
-        data = mujoco.MjData(model)
-    except Exception as e:
-        print(f"[ERROR] MuJoCo model load failed: {e}")
-        print("Generated XML:")
-        print(xml_str)
-        raise
-    finally:
-        os.unlink(tmpf.name)
-
-    nv = model.nv
-    if verbose:
-        print(f"[MuJoCo] nq={model.nq}, nv={nv}, nsite={model.nsite}")
-
-    # ── 2. 加载 RobotModel ──
-    robot = RobotModel(urdf_path, ee_frame_name=ee_frame,
-                       robot_name=os.path.basename(robot_urdf),
-                       verbose=verbose)
-
-    if home_q is None:
-        # 默认舒适位形: 与 robot_configs 'ur12e' 的 home_q 一致
-        # (EE 在 [0.50, 0, 0.50], 末端竖直朝下, 避开腕部奇异)
-        home_q = np.array([-0.356, -1.498, 1.81, 1.259, 1.571, -0.124])[:robot.nv]
-
-    if verbose:
-        print(f"[Home] q = {home_q}")
-
-    # ── 3. 初始化轨迹 ──
-    dt = model.opt.timestep
-    T = int(max_time / dt)
-
-    if task == 'regulation':
-        data.qpos[:nv] = home_q.copy()
-        data.qvel[:nv] = np.zeros(nv)
-        mujoco.mj_forward(model, data)
-        robot.update(home_q)
-        p_start, R_start = robot.get_pose()
-        # 调节任务: 以起始位姿为期望
-        pd_t = lambda t: p_start
-        Rd_t = lambda t: R_start
-        dpd_t = lambda t: np.zeros(3)
-        dRd_t = lambda t: np.zeros((3, 3))
-        ddpd_t = lambda t: np.zeros(3)
-        ddRd_t = lambda t: np.zeros((3, 3))
-    else:
-        # 动态任务: 从 task_config 读取参数
-        funcs = build_trajectory(task, cfg=task_config)
-        pd_t, Rd_t = funcs.pd_t, funcs.Rd_t
-        dpd_t, dRd_t = funcs.dpd_t, funcs.dRd_t
-        ddpd_t, ddRd_t = funcs.ddpd_t, funcs.ddRd_t
-
-        if verbose:
-            print(f"[Trajectory] start  = {pd_t(0).ravel()}")
-
-        # ★ IK: 将机械臂摆到轨迹起点
-        pd0 = pd_t(0).ravel()
-        robot.update(data.qpos[:nv].copy())
-        _, R_home = robot.get_pose()
-        q_ik = robot.gauss_newton_IK(pd0, R_home, home_q,
-                                      step_size=0.5, tol=1e-6, max_cnt=500)
-        data.qpos[:nv] = q_ik.copy()
-        data.qvel[:nv] = np.zeros(nv)
-        mujoco.mj_forward(model, data)
-        robot.update(q_ik)
-        p_start, R_start = robot.get_pose()
-        if verbose:
-            print(f"[IK] q_ik    = {np.round(q_ik, 4)}")
-            print(f"[IK] p_ik    = {p_start}")
-            print(f"[IK] pos_err = {np.linalg.norm(p_start - pd0):.6e}")
-
-    # ── 4. 朝向渐进混合 ──
-    BLEND_DURATION = 0.4
-    is_dynamic_task = (task != 'regulation')
-    if is_dynamic_task:
-        _, R_home_ik = robot.get_pose()
-        if verbose:
-            Rd0_des = Rd_t(0).ravel().reshape(3, 3)
-            init_rot_err = 0.5 * np.linalg.norm(
-                np.cross(R_home_ik[:, 0], Rd0_des[:, 0])
-                + np.cross(R_home_ik[:, 1], Rd0_des[:, 1])
-                + np.cross(R_home_ik[:, 2], Rd0_des[:, 2]))
-            print(f"[Blend] Initial orientation error: {init_rot_err:.4f} rad")
-
-    # ── 5. 控制器 ──
-    if bandwidth is None:
-        bandwidth = task_config.controller.get('bandwidth', 30.0)
-    if damping is None:
-        damping = task_config.controller.get('damping', 1.0)
-
-    controller = GICController(
-        robot,
-        bandwidth=bandwidth,
-        damping=damping,
-        torque_limits=torque_limits,
-    )
-
-    if verbose:
-        print(f"[GIC] bandwidth={bandwidth}, damping={damping}")
-        # 验证正运动学一致性
-        q_actual = data.qpos[:nv].copy()
-        robot.update(q_actual)
-        model_p, _ = robot.get_pose()
-        mujoco_p = data.site_xpos[0].copy() if model.nsite > 0 else np.zeros(3)
-        print(f"[FK] MuJoCo  EE: {mujoco_p}")
-        print(f"[FK] Pinocchio EE: {model_p}")
-        print(f"[FK] pos_diff: {np.linalg.norm(mujoco_p - model_p):.6e}")
-
-    # ── 6. 记录 ──
-    log = {
-        't': np.zeros(T),
-        'p': np.zeros((T, 3)),
-        'pd': np.zeros((T, 3)),
-        'R': np.zeros((T, 3, 3)),
-        'Rd': np.zeros((T, 3, 3)),
-        'tau': np.zeros((T, nv)),
-        'pos_err': np.zeros(T),
-        'rot_err': np.zeros(T),
-        'q': np.zeros((T, nv)),
-        'dq': np.zeros((T, nv)),
-    }
-
-    # ── 7. Viewer ──
-    viewer = None
-    trail_cfg = task_config.trail
-    TRAIL_INTERVAL = trail_cfg.get('interval', 8)
-    TRAIL_MAX = trail_cfg.get('max_points', 1200)
-    TRAIL_SIZE = trail_cfg.get('sphere_size', 0.006)
-    TRAIL_COLOR = np.array(trail_cfg.get('color', [1.0, 0.2, 0.2, 0.85]),
-                           dtype=float)
-    trail_actual = []
-
-    if show_viewer:
-        try:
-            from mujoco.viewer import launch_passive
-            viewer = launch_passive(model, data)
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"[Viewer] Failed to launch: {e}")
-            show_viewer = False
-
-    # ── 8. 主循环 ──
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"Running GIC simulation: task={task}, T={T} steps ({max_time}s)")
-        print(f"{'='*60}")
-
-    t0 = time.time()
-    for i in range(T):
-        t = i * dt
-
-        # 期望轨迹
-        pd = pd_t(t).ravel()
-        Rd_des = Rd_t(t).reshape((3, 3))
-
-        # 朝向渐进混合 (前 BLEND_DURATION 秒)
-        if is_dynamic_task and t < BLEND_DURATION:
-            alpha = t / BLEND_DURATION
-            Rd = rotmat_slerp(R_home_ik, Rd_des, alpha)
-        else:
-            Rd = Rd_des
-
-        blend_factor = min(1.0, t / BLEND_DURATION) if is_dynamic_task else 1.0
-        dpd = dpd_t(t).ravel()
-        dRd = dRd_t(t).reshape((3, 3)) * blend_factor
-        ddpd = ddpd_t(t).ravel()
-        ddRd = ddRd_t(t).reshape((3, 3)) * blend_factor
-
-        # 期望体速度
-        vd = Rd.T @ dpd.reshape((-1, 1))
-        wd = vee_map(Rd.T @ dRd)
-        dvd = (Rd.T @ ddpd.reshape((-1, 1))
-               - hat_map(wd) @ Rd.T @ dpd.reshape((-1, 1)))
-        dwd = vee_map(Rd.T @ ddRd - hat_map(wd) @ Rd.T @ dRd)
-
-        # 读取 MuJoCo 状态
-        q = data.qpos[:nv].copy()
-        dq = data.qvel[:nv].copy()
-
-        # GIC 控制力矩
-        tau_cmd = controller.compute(q, dq, pd, Rd, vd, wd, dvd, dwd)
-
-        # 应用力矩 → MuJoCo 步进
-        data.ctrl[:] = tau_cmd[:model.nu]
-        mujoco.mj_step(model, data)
-
-        # 记录
-        log['t'][i] = t
-        log['q'][i] = q
-        log['dq'][i] = dq
-
-        if model.nsite > 0:
-            site_p = data.site_xpos[0].copy()
-            site_R = data.site_xmat[0].copy().reshape((3, 3))
-        else:
-            robot.update(q)
-            site_p, site_R = robot.get_pose()
-
-        log['p'][i] = site_p
-        log['pd'][i] = pd
-        log['R'][i] = site_R
-        log['Rd'][i] = Rd
-        log['tau'][i] = tau_cmd
-
-        # 误差
-        ep = site_p - pd
-        eR = -0.5 * (np.cross(site_R[:, 0], Rd[:, 0])
-                     + np.cross(site_R[:, 1], Rd[:, 1])
-                     + np.cross(site_R[:, 2], Rd[:, 2]))
-        log['pos_err'][i] = np.linalg.norm(ep)
-        log['rot_err'][i] = np.linalg.norm(eR)
-
-        # Viewer 轨迹绘制
-        if viewer:
-            if i % TRAIL_INTERVAL == 0:
-                trail_actual.append(site_p.copy())
-                if len(trail_actual) > TRAIL_MAX:
-                    trail_actual.pop(0)
-            if i % 5 == 0:
-                ngeom = min(len(trail_actual), viewer.user_scn.maxgeom)
-                if ngeom > 1:
-                    for j in range(ngeom):
-                        pos = trail_actual[j]
-                        mujoco.mjv_initGeom(
-                            viewer.user_scn.geoms[j],
-                            mujoco.mjtGeom.mjGEOM_SPHERE,
-                            np.array([TRAIL_SIZE, 0, 0]),
-                            pos, np.eye(3).flatten(), TRAIL_COLOR,
-                        )
-                    viewer.user_scn.ngeom = ngeom
-                viewer.sync()
-
-        # 进度
-        if verbose and (i % 500 == 0 or i == T - 1):
-            print(f"  t={t:.3f}s | pos_err={log['pos_err'][i]:.6f} | "
-                  f"rot_err={log['rot_err'][i]:.6f} | "
-                  f"tau_norm={np.linalg.norm(tau_cmd):.2f}")
-
-    t_elapsed = time.time() - t0
-    if verbose:
-        print(f"\nSimulation finished in {t_elapsed:.2f}s "
-              f"({(T / t_elapsed):.0f} Hz)")
-
-    # ── 9. 连续循环 (仅 viewer 开启时) ──
-    loop_active = loop and show_viewer and viewer is not None
-    if loop_active:
-        i = T
-        if verbose:
-            print(f"[Loop] Continuous mode. Close viewer to stop.")
-        while viewer.is_running():
-            t = i * dt
-            pd = pd_t(t).ravel()
-            Rd = Rd_t(t).reshape((3, 3))
-            dpd = dpd_t(t).ravel()
-            dRd = dRd_t(t).reshape((3, 3))
-            ddpd = ddpd_t(t).ravel()
-            ddRd = ddRd_t(t).reshape((3, 3))
-
-            vd = Rd.T @ dpd.reshape((-1, 1))
-            wd = vee_map(Rd.T @ dRd)
-            dvd = (Rd.T @ ddpd.reshape((-1, 1))
-                   - hat_map(wd) @ Rd.T @ dpd.reshape((-1, 1)))
-            dwd = vee_map(Rd.T @ ddRd - hat_map(wd) @ Rd.T @ dRd)
-
-            q = data.qpos[:nv].copy()
-            dq = data.qvel[:nv].copy()
-            tau_cmd = controller.compute(q, dq, pd, Rd, vd, wd, dvd, dwd)
-            data.ctrl[:] = tau_cmd[:model.nu]
-            mujoco.mj_step(model, data)
-
-            if model.nsite > 0:
-                ee_p = data.site_xpos[0].copy()
-            else:
-                robot.update(q)
-                ee_p = robot.get_pose()[0]
-
-            if i % TRAIL_INTERVAL == 0:
-                trail_actual.append(ee_p)
-                if len(trail_actual) > TRAIL_MAX:
-                    trail_actual.pop(0)
-
-            if i % 5 == 0:
-                ngeom = min(len(trail_actual), viewer.user_scn.maxgeom)
-                if ngeom > 1:
-                    for j in range(ngeom):
-                        pos = trail_actual[j]
-                        mujoco.mjv_initGeom(
-                            viewer.user_scn.geoms[j],
-                            mujoco.mjtGeom.mjGEOM_SPHERE,
-                            np.array([TRAIL_SIZE, 0, 0]),
-                            pos, np.eye(3).flatten(), TRAIL_COLOR,
-                        )
-                    viewer.user_scn.ngeom = ngeom
-                viewer.sync()
-            i += 1
-
-    # ── 10. 清理 ──
-    if viewer:
-        if not loop_active and stop_at_end:
-            print("[Viewer] Paused at final pose. Close window to exit.")
-            while viewer.is_running():
-                viewer.sync()
-                time.sleep(0.02)
-        elif not loop_active:
-            time.sleep(1)
-        viewer.close()
-
-    return log, robot
-
-
-# ====================================================================
-# 4. 对比验证: Pinocchio vs MuJoCo
-# ====================================================================
-
-def cross_validate_models(urdf_path, ee_frame='tool0', test_q=None,
-                           link_to_mesh=None, mesh_subdir=''):
-    """在多个随机配置下比较 Pinocchio RobotModel 与 MuJoCo 的输出."""
-    import mujoco
-
-    print(f"\n{'='*60}")
-    print("Cross-Validation: Pinocchio RobotModel vs MuJoCo")
-    print(f"{'='*60}")
-
-    robot = RobotModel(urdf_path, ee_frame_name=ee_frame, verbose=False)
-    nv = robot.nv
-
-    xml_str = urdf_joints_to_mujoco_xml(
-        urdf_path, ee_frame, debug=False,
-        link_to_mesh=link_to_mesh, mesh_subdir=mesh_subdir)
-    import tempfile
-    tmpf = tempfile.NamedTemporaryFile(suffix='.xml', mode='w', delete=False)
-    tmpf.write(xml_str)
-    tmpf.close()
-
-    model = mujoco.MjModel.from_xml_path(tmpf.name)
-    data = mujoco.MjData(model)
-    os.unlink(tmpf.name)
-
-    if test_q is None:
-        np.random.seed(42)
-        test_configs = [np.random.uniform(-1.0, 1.0, nv) for _ in range(5)]
-    else:
-        test_configs = [test_q]
-
-    has_site = model.nsite > 0
-
-    for idx_q, q in enumerate(test_configs):
-        data.qpos[:nv] = q.copy()
-        data.qvel[:nv] = np.zeros(nv)
-        mujoco.mj_forward(model, data)
-
-        mujoco_p = data.site_xpos[0].copy() if has_site else np.zeros(3)
-
-        robot.update(q)
-        robot_p, _ = robot.get_pose()
-
-        pos_diff = np.linalg.norm(mujoco_p - robot_p) if has_site else -1
-
-        if has_site and model.nv >= nv:
-            jac_pos_mj = np.zeros((3, model.nv))
-            jac_rot_mj = np.zeros((3, model.nv))
-            mujoco.mj_jacSite(model, data, jac_pos_mj, jac_rot_mj, 0)
-            J_mj = np.vstack([jac_pos_mj[:, :nv], jac_rot_mj[:, :nv]])
-        else:
-            J_mj = None
-
-        J_geom = robot.get_jacobian()
-
-        jac_diff = (np.linalg.norm(J_mj - J_geom) / max(1e-10, np.linalg.norm(J_mj))
-                    if J_mj is not None else -1)
-
-        print(f"  Test config {idx_q + 1}: q={np.round(q, 3)}")
-        if has_site:
-            print(f"    pos_diff = {pos_diff:.6e}")
-        if J_mj is not None:
-            print(f"    jac_diff = {jac_diff:.6e} (rel)")
-
-
-# ====================================================================
-# 5. 主入口
-# ====================================================================
-
-if __name__ == '__main__':
+def parse_args():
     parser = argparse.ArgumentParser(
-        description='SE(3) GIC Control — MuJoCo Simulation')
-    parser.add_argument('--robot', type=str, default='ur12e',
-                        choices=['ur12e', 'ur3', 'franka'],
-                        help='Robot to simulate')
+        description="SE(3) GIC 控制实机执行入口 (UR3/UR12e)")
+    parser.add_argument('--robot', type=str, default='ur3',
+                        choices=['ur12e', 'ur3'],
+                        help='机器人类型 (ur3 默认 IP .11; ur12e 默认 IP .100)')
     parser.add_argument('--task', type=str, default='regulation',
                         choices=['regulation', 'circle', 'line'],
-                        help='Trajectory task')
-    parser.add_argument('--max-time', type=float, default=5.0,
-                        help='Simulation time [s]')
+                        help='任务类型: regulation 位置保持 / circle / line 轨迹跟踪')
+    parser.add_argument('--ip', type=str, default=None,
+                        help='UR 控制箱 IP (默认从机器人配置加载)')
+    parser.add_argument('--dt', type=float, default=0.004,
+                        help='标称控制周期 (s), 默认 0.004 = 250 Hz')
+    parser.add_argument('--duration', type=float, default=15.0,
+                        help='Phase 2 主保持/跟踪时长 (s)')
+    parser.add_argument('--hold-time', type=float, default=2.0,
+                        help='Phase 0 低增益自检时长 (s)')
+    parser.add_argument('--hold-bandwidth', type=float, default=8.0,
+                        help='Phase 0 自检带宽 ω (rad/s), 低增益安全起步')
+    parser.add_argument('--skip-phase0', action='store_true',
+                        help='跳过 Phase 0 低带宽自检, 直接进入主阶段 (调试用, 请谨慎)')
+    parser.add_argument('--bandwidth', type=float, default=20.0,
+                        help='主控制带宽 ω (rad/s), 默认 20 (UR3 推荐)')
+    parser.add_argument('--damping', type=float, default=1.0,
+                        help='阻尼比 ζ, 默认 1.0 临界阻尼')
+    parser.add_argument('--blend-time', type=float, default=0.5,
+                        help='轨迹起步混合时长 (s), 从当前位姿平滑过渡到轨迹起点')
+    parser.add_argument('--no-feasibility', action='store_true',
+                        help='跳过轨迹 IK 可达性预检')
+    parser.add_argument('--feasibility-samples', type=int, default=24,
+                        help='可达性预检采样点数, 默认 24')
+    parser.add_argument('--torque-scale', type=float, default=1.0,
+                        help='力矩限幅缩放系数 (安全限幅 × scale), 默认 1.0')
+    parser.add_argument('--control-mode', type=str, default='directTorque',
+                        choices=['directTorque', 'servoJ'],
+                        help='控制模式: directTorque (e-Series ≥5.23, 真力矩控制) / '
+                             'servoJ (CB3 classic 回退, 无 directTorque 时用; 力矩折算成关节目标位)')
+    parser.add_argument('--servo-gain', type=float, default=1000.0,
+                        help='servoJ 跟踪增益 (100–2000), 越高跟踪越紧. 默认 1000')
+    parser.add_argument('--servo-lookahead', type=float, default=0.1,
+                        help='servoJ lookahead_time (0.03–0.2 s), 越小越灵敏. 默认 0.1')
+    parser.add_argument('--servo-qdd-max', type=float, default=20.0,
+                        help='servoJ 回退: 期望关节加速度限幅 (rad/s²). 默认 20')
+    parser.add_argument('--servo-dq-max', type=float, default=2.0,
+                        help='servoJ 回退: 期望关节速度限幅 (rad/s). 默认 2.0')
+    parser.add_argument('--servo-ref-damp', type=float, default=15.0,
+                        help='servoJ 回退: 参考速度阻尼 (1/s). 防参考积分跑赢内层伺服而发散. 默认 15')
+    parser.add_argument('--servo-bandwidth-cap', type=float, default=10.0,
+                        help='servoJ 回退: GIC 有效带宽上限 (rad/s). '
+                             '位置伺服级联要求外环带宽低于内层伺服带宽, 默认 10')
+    parser.add_argument('--center', type=float, nargs=3, metavar=('X', 'Y', 'Z'),
+                        default=None,
+                        help='覆盖轨迹圆心/中点 [x, y, z] (m). 仅对 circle/line 有效')
+    parser.add_argument('--radius', type=float, default=None,
+                        help='覆盖 circle 半径 (m). 默认读 task_config')
+    parser.add_argument('--preview', action='store_true',
+                        help='MuJoCo 闭环预览: 不连接硬件, 用同一参数在仿真里跑任务, '
+                             '看轨迹 + 自动碰撞判定 (✓/✗), 通过后再上真机')
     parser.add_argument('--no-viewer', action='store_true',
-                        help='Disable MuJoCo viewer')
-    parser.add_argument('--save-plot', type=str, default=None,
-                        help='Save plot to file')
-    parser.add_argument('--cross-validate', action='store_true',
-                        help='Run cross-validation only')
-    parser.add_argument('--no-stop', action='store_true',
-                        help='Do not pause at final pose')
-    parser.add_argument('--no-loop', action='store_true',
-                        help='Disable continuous task loop')
-    parser.add_argument('--bandwidth', type=float, default=None,
-                        help='GIC bandwidth (overrides task_config)')
-    parser.add_argument('--damping', type=float, default=None,
-                        help='GIC damping ratio (overrides task_config)')
-    args = parser.parse_args()
+                        help='预览不启动 MuJoCo 可视化窗口 (headless, 只出碰撞结论; 测试用)')
+    parser.add_argument('--preview-speed', type=float, default=1.0,
+                        help='预览实时倍速 (>1 加速, <1 慢放). 默认 1.0 = 与实机同步节奏')
+    parser.add_argument('--preview-start-q', type=float, nargs=6, metavar='Q',
+                        default=None,
+                        help='预览起步位形 (6 个关节角 rad). 默认 home_q. '
+                             '若真机当前位形不是 home (臂已折叠/低位), 用 --dry-run '
+                             '读出当前 q 传入, 使预览从真实起步位形开始 (混合路径才真实)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='干跑: 连接 + FK 自检, 不发任何力矩')
+    parser.add_argument('--save-log', type=str, default=None,
+                        help='将记录数据保存为 npz 文件路径 (可选)')
+    parser.add_argument('--log-dir', type=str, default=None,
+                        help='记录每控制周期全分辨率数据到 CSV (写入此目录, 崩溃时也有数据). '
+                             '与 --preview 同用则记仿真; 用于分析真机 vs 仿真差异 '
+                             '(配合 monitor_rtde.py / analyze_arm_log.py)')
+    return parser.parse_args()
 
-    # ── 机器人配置 ──
-    if args.robot in ('ur12e', 'ur3'):
-        cfg = get_robot_config(args.robot)
-        urdf_file = cfg['urdf']
-        ee_frame = cfg['ee_frame']
-        home_q = cfg['home_q'].copy()
-        link_to_mesh = cfg['link_to_mesh']
-        mesh_subdir = cfg['mesh_subdir']
-        torque_limits = cfg['full_torque_limits']
-    else:  # franka
-        urdf_file = 'franka_panda.urdf'
-        ee_frame = 'panda_hand_tcp'
-        home_q = np.array([0.0, -0.3, 0.0, -2.5, 0.0, 2.5, 0.0, 0.02, 0.02])
-        link_to_mesh = None
-        mesh_subdir = ''
-        torque_limits = None
 
-    urdf_path = os.path.join(URDF_DIR, urdf_file)
-    if not os.path.exists(urdf_path):
-        print(f"[ERROR] URDF not found: {urdf_path}")
-        sys.exit(1)
+# ====================================================================
+# 2. 静态轨迹 (regulation: 期望位姿恒定, 速度加速度为零)
+# ====================================================================
 
-    if args.cross_validate:
-        cross_validate_models(urdf_path, ee_frame,
-                              link_to_mesh=link_to_mesh,
-                              mesh_subdir=mesh_subdir)
-        sys.exit(0)
-
-    # ── 运行仿真 ──
-    do_loop = (not args.no_loop and args.task != 'regulation'
-               and not args.no_viewer)
-    log, robot = run_simulation(
-        urdf_file,
-        task=args.task,
-        show_viewer=not args.no_viewer,
-        max_time=args.max_time,
-        home_q=home_q,
-        ee_frame=ee_frame,
-        link_to_mesh=link_to_mesh,
-        mesh_subdir=mesh_subdir,
-        torque_limits=torque_limits,
-        bandwidth=args.bandwidth,
-        damping=args.damping,
-        verbose=True,
-        stop_at_end=not args.no_stop,
-        loop=do_loop,
+def make_static_traj(pd, Rd) -> TrajectoryFuncs:
+    """构建恒定位姿的静态轨迹 (regulation 保持用)."""
+    pd_arr = np.asarray(pd, dtype=float).ravel()
+    Rd_arr = np.asarray(Rd, dtype=float).reshape(3, 3)
+    return TrajectoryFuncs(
+        pd_t=lambda t: pd_arr,
+        Rd_t=lambda t: Rd_arr,
+        dpd_t=lambda t: np.zeros(3),
+        dRd_t=lambda t: np.zeros((3, 3)),
+        ddpd_t=lambda t: np.zeros(3),
+        ddRd_t=lambda t: np.zeros((3, 3)),
     )
 
-    # ── 绘图 ──
-    plot_results(log, save_path=args.save_plot)
 
-    print("\n✅ Simulation complete!")
+# ====================================================================
+# 3. 统一控制循环 (保持 / 跟踪共用)
+# ====================================================================
+
+def run_tracking(hw, robot_model, controller, traj, duration, dt,
+                 phase_name, logger, blend_time=0.0, log_every=1.0,
+                 bridge=None, log_dir=None):
+    """以轨迹 ``traj`` 运行 GIC 跟踪 / 保持.
+
+    循环每周期: 真实时间求值轨迹 → 起步混合 → GICController.compute →
+    发力矩 / servoJ 下发 → 记录误差 → 安全检查 → wait_next_cycle.
+    周期计时使用 ``wait_next_cycle`` 返回的真实经过时间, 不假定严格固定步长.
+
+    :param traj:       TrajectoryFuncs — 期望轨迹时间函数族.
+                       regulation 传 make_static_traj() 的静态轨迹, blend_time=0.
+    :param blend_time: 起步混合时长 (s). 前 blend_time 秒从当前位姿平滑过渡到
+                       轨迹参考 (位置 lerp + 朝向 slerp), 前馈速度/加速度按
+                       bf = min(1, t/blend_time) 缩放, 避免起始位姿差力矩跳变.
+                       0 → 不混合 (期望恒为轨迹值).
+    :param log_every:  状态打印间隔 (s)
+    :param bridge:     ServoJTorqueBridge — CB3 servoJ 回退时传入.
+                       None=directTorque (直接发力矩); 非 None=力矩折算成
+                       关节目标位, 走 hw.set_servo_joint_positions().
+    :param log_dir:    若给定, 每控制周期写全分辨率 CSV 到该目录
+                       (每个相位一个文件, 崩溃时也有数据).
+    :returns: dict — t/p/q/tau/err(位置误差)/rerr(旋转误差)/blend_time/
+                     t_total/n_steps/stopped
+    """
+    nv = robot_model.nv
+
+    # 起步位姿 (混合起点; regulation 时即期望位姿)
+    q, dq = hw.get_joint_states()
+    robot_model.update(q, dq)
+    p_start, R_start = robot_model.get_pose()
+    if bridge is not None:
+        bridge.reset(q, dq)   # 每个相位开始时复位积分器到当前关节状态
+
+    # 日志缓存 (滑动采样, 上限 5000 点)
+    n_steps = int(duration / dt)
+    step_log = min(n_steps, 5000)
+    log_interval = max(1, n_steps // step_log)
+    t_log, p_log, q_log, tau_log, err_log, rerr_log = [], [], [], [], [], []
+
+    # 全分辨率 CSV 记录 (每周期写, 崩溃时数据也在)
+    csv_log = None
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        fname = os.path.join(
+            log_dir,
+            f"{phase_name.replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        csv_log = ArmCsvLogger(fname, nv)
+        logger.info(f"[{phase_name}] 记录每控制周期数据 → {fname}")
+
+    t_real = 0.0
+    n = 0
+    stopped = False
+
+    logger.info(f"[{phase_name}] 开始 ({duration:.1f}s, 混合 {blend_time:.1f}s)")
+
+    while t_real < duration - 1e-6:
+        # ── 1. 期望轨迹 (真实时间求值) ──
+        bf = 1.0 if blend_time <= 0 else min(1.0, t_real / blend_time)
+        pd_ref = traj.pd_t(t_real).ravel()
+        Rd_ref = traj.Rd_t(t_real).reshape(3, 3)
+        # 起步混合: 当前位姿 → 轨迹参考
+        pd = (1.0 - bf) * p_start + bf * pd_ref
+        Rd = rotmat_slerp(R_start, Rd_ref, bf)
+        # 体坐标系期望速度/加速度 (前馈按 bf 缩放, 以混合后 Rd 为体系)
+        vd, wd, dvd, dwd = eval_body_twist(traj, t_real, Rd, bf)
+
+        # ── 2/3. GIC 控制力矩 → 发力矩 或 servoJ 关节目标位 ──
+        q, dq = hw.get_joint_states()
+        if bridge is not None:
+            # CB3 回退: 力矩折算成 servoJ 关节目标位, 由 UR 内层伺服紧密跟踪
+            q_servo, tau = bridge.compute(q, dq, pd, Rd, vd, wd, dvd, dwd)
+            hw.set_servo_joint_positions(q_servo)
+        else:
+            tau = controller.compute(q, dq, pd, Rd, vd, wd, dvd, dwd)
+            hw.set_joint_torques(tau)
+
+        # ── 4. 记录 (误差对照真实轨迹参考, 非混合参考) ──
+        robot_model.update(q, dq)
+        p_cur, R_cur = robot_model.get_pose()
+        pos_err = float(np.linalg.norm(p_cur - pd_ref))
+        R_rel = R_cur.T @ Rd_ref
+        cos_theta = np.clip(0.5 * (np.trace(R_rel) - 1.0), -1.0, 1.0)
+        rot_err = float(np.arccos(cos_theta))
+        # 全分辨率 CSV (每周期): q_servo=下发目标位, dq_des=桥接器参考速度
+        if csv_log is not None:
+            q_s = q_servo if bridge is not None else q
+            dq_d = bridge.dq_target if bridge is not None else [np.nan] * nv
+            tl = getattr(controller, '_tau_limits', None)
+            tl_row = list(tl) if tl is not None else [np.nan] * nv
+            csv_log.write(arm_log_row(
+                nv, t_real, bf, pos_err, rot_err, pd, pd_ref, p_cur,
+                q, dq, q_s, dq_d, tau, tl_row))
+        n += 1
+        if n % log_interval == 0:
+            t_log.append(t_real)
+            p_log.append(p_cur.copy())
+            q_log.append(q.copy())
+            tau_log.append(tau.copy())
+            err_log.append(pos_err)
+            rerr_log.append(rot_err)
+
+        # ── 5. 周期状态 (每秒) ──
+        if n % max(1, int(log_every / dt)) == 0:
+            logger.info(
+                f"[{phase_name}] t={t_real:6.2f}s  "
+                f"||ep||={pos_err*1000:6.2f}mm  "
+                f"rot={rot_err*1000:6.1f}mrad  "
+                f"||tau||={np.linalg.norm(tau):5.1f}Nm  "
+                f"p=[{p_cur[0]:.3f}, {p_cur[1]:.3f}, {p_cur[2]:.3f}]")
+
+        # ── 6. 安全检查 ──
+        err_state = hw.get_error_state()
+        if err_state != 0:
+            label = {1: '急停', 2: '保护性停止', 3: '安全模式警告', 4: '安全系统故障'}.get(
+                err_state, '未知')
+            logger.error(f"[{phase_name}] 错误状态 {err_state} ({label})")
+            sm = hw.get_safety_mode()
+            if sm is not None:
+                logger.error(f"  UR 安全模式: {sm[0]} ({sm[1]})")
+            raw_bits = hw.get_safety_status_bits()
+            if raw_bits is not None:
+                logger.error(f"  safety_status_bits: 0b{raw_bits:032b} (0x{raw_bits:08X})")
+            if err_state == 2:
+                logger.error("  提示: 保护性停止 — 通常是首发力矩触发安全限位(URDF 重力补偿/惯量不准或符号错误);")
+                logger.error("        先 --torque-scale 0.3 降矩重试, 并校准重力补偿")
+                logger.error("        (directTorque 还需控制器软件 PolyScope ≥ 5.23, e-Series)")
+            hw.emergency_stop()
+            stopped = True
+            break
+
+        # ── 7. 等待下一周期 (返回真实经过时间) ──
+        t_real += hw.wait_next_cycle()
+
+    if csv_log is not None:
+        csv_log.close()
+
+    summary = {
+        't':          np.asarray(t_log),
+        'p':          np.asarray(p_log) if p_log else np.zeros((0, 3)),
+        'q':          np.asarray(q_log) if q_log else np.zeros((0, nv)),
+        'tau':        np.asarray(tau_log) if tau_log else np.zeros((0, nv)),
+        'err':        np.asarray(err_log) if err_log else np.zeros(0),
+        'rerr':       np.asarray(rerr_log) if rerr_log else np.zeros(0),
+        'blend_time': float(blend_time),
+        't_total':    t_real,
+        'n_steps':    n,
+        'stopped':    stopped,
+    }
+    return summary
+
+
+# ====================================================================
+# 4. 轨迹 IK 可达性预检
+# ====================================================================
+
+def check_trajectory_feasibility(robot_model, traj, home_q, duration,
+                                 n_samples=24, tol_pos=0.01, tol_rot=0.05,
+                                 warn_lim_frac=0.90, warn_cond=1e4):
+    """轨迹 IK 可达性预检 (实机运行前).
+
+    在 ``duration`` 内均匀采样 ``n_samples`` 个轨迹点, 逐点高斯-牛顿 IK 求解,
+    检查:
+      1. 收敛 — 位置/旋转误差是否在容差内 (能否到达)
+      2. 限位 — 关节是否接近运动范围边缘
+      3. 奇异 — 体雅可比条件数是否过大
+
+    :returns: (ok, report_dict) — ok=False 时调用方应中止运行
+    """
+    logger = logging.getLogger("run_se3_control")
+    ts = np.linspace(0, duration, max(2, n_samples))
+    lo = robot_model.model.lowerPositionLimit[:robot_model.nv]
+    hi = robot_model.model.upperPositionLimit[:robot_model.nv]
+    span = hi - lo
+    q_seed = np.asarray(home_q, dtype=float).ravel()
+
+    fails_pos, fails_rot = [], []
+    max_lim_frac, max_cond, worst_cond_t = 0.0, 0.0, None
+
+    for t in ts:
+        pd = traj.pd_t(t).ravel()
+        Rd = traj.Rd_t(t).reshape(3, 3)
+        q_ik = robot_model.gauss_newton_IK(pd, Rd, q_seed, step_size=0.5,
+                                           tol=1e-6, max_cnt=300, verbose=False)
+        p_ik, R_ik = robot_model.get_pose()
+        ep = float(np.linalg.norm(p_ik - pd))
+        R_rel = R_ik.T @ Rd
+        c = np.clip(0.5 * (np.trace(R_rel) - 1.0), -1.0, 1.0)
+        er = float(np.arccos(c))
+        if ep > tol_pos:
+            fails_pos.append((float(t), ep))
+        if er > tol_rot:
+            fails_rot.append((float(t), er))
+
+        # 限位利用 (距运动范围中心的偏差占比)
+        if np.all(span > 0):
+            half = 0.5 * span
+            frac = float(np.max(np.abs(q_ik - 0.5 * (lo + hi)) / half))
+        else:
+            frac = 1.0
+        max_lim_frac = max(max_lim_frac, frac)
+
+        # 奇异 (体雅可比条件数)
+        robot_model.update(q_ik)
+        s = np.linalg.svd(robot_model.get_body_jacobian(), compute_uv=False)
+        cond = float(s[0] / s[-1]) if s[-1] > 1e-12 else float('inf')
+        if cond > max_cond:
+            max_cond, worst_cond_t = cond, float(t)
+
+        q_seed = q_ik   # 热启动下一个采样点
+
+    ok = (not fails_pos) and (not fails_rot)
+    report = dict(n_samples=len(ts), fails_pos=fails_pos, fails_rot=fails_rot,
+                  max_lim_frac=max_lim_frac, max_cond=max_cond,
+                  worst_cond_t=worst_cond_t)
+
+    logger.info(f"\n{'='*50}")
+    logger.info(f"轨迹可达性预检: {len(ts)} 采样点, "
+                f"容差 pos<{tol_pos*1000:.0f}mm rot<{tol_rot*1000:.0f}mrad")
+    if fails_pos:
+        logger.warning(f"  ✗ 位置不可达 {len(fails_pos)} 点: "
+                       f"{[f'{t:.1f}s({e*1000:.0f}mm)' for t, e in fails_pos[:5]]}")
+    else:
+        logger.info("  ✓ 位置全部可达")
+    if fails_rot:
+        logger.warning(f"  ✗ 朝向不可达 {len(fails_rot)} 点: "
+                       f"{[f'{t:.1f}s({e*1000:.0f}mrad)' for t, e in fails_rot[:5]]}")
+    else:
+        logger.info("  ✓ 朝向全部可达")
+    logger.info(f"  最大限位利用: {max_lim_frac*100:.0f}%  "
+                f"({'⚠️ 接近关节限位' if max_lim_frac > warn_lim_frac else '余量充足'})")
+    if np.isfinite(max_cond):
+        cond_warn = max_cond > warn_cond
+        logger.info(f"  最大雅可比条件数: {max_cond:.1e} @ t={worst_cond_t:.1f}s  "
+                    f"({'⚠️ 接近奇异' if cond_warn else '远离奇异'})")
+    else:
+        logger.warning("  ✗ 存在奇异点 (雅可比奇异)")
+        cond_warn = True
+    logger.info(f"{'='*50}")
+
+    if not ok:
+        logger.error("预检未通过 — 请调整轨迹参数 (se3_control/config/task_config.py) "
+                     "或更换起始位形")
+    return ok, report
+
+
+# ====================================================================
+# 5. 摘要与结论
+# ====================================================================
+
+def print_summary(summary, robot_name, save_log=None, task='regulation'):
+    """打印运行摘要统计并给出通过结论."""
+    logger = logging.getLogger("run_se3_control")
+    err = summary['err']
+    rerr = summary['rerr']
+    tt = summary['t']
+    blend_time = summary.get('blend_time', 0.0)
+
+    logger.info(f"\n{'='*50}")
+    logger.info(f"运行摘要 [{robot_name}]  任务={task}")
+    logger.info(f"  实际运行:     {summary['t_total']:.2f} s")
+    logger.info(f"  控制周期数:   {summary['n_steps']}")
+    if summary['n_steps'] > 0:
+        logger.info(f"  平均频率:     {summary['n_steps']/summary['t_total']:.1f} Hz")
+
+    if err.size > 0:
+        tau = summary['tau']
+        p = summary['p']
+        # 稳态 (起步混合之后) 的误差, 排除起步瞬态
+        mask = tt > blend_time + 1e-6
+        err_ss = err[mask] if np.any(mask) else err
+        rerr_ss = rerr[mask] if np.any(mask) else rerr
+
+        logger.info(f"  最终位置误差:   {err[-1]*1000:7.2f} mm")
+        logger.info(f"  平均位置误差:   {np.mean(err)*1000:7.2f} mm")
+        logger.info(f"  最大位置误差:   {np.max(err)*1000:7.2f} mm")
+        if np.any(mask):
+            logger.info(f"  └─ 稳态位置误差: 均值 {np.mean(err_ss)*1000:6.2f} mm, "
+                        f"最大 {np.max(err_ss)*1000:6.2f} mm")
+        logger.info(f"  平均旋转误差:   {np.mean(rerr)*1000:7.2f} mrad")
+        logger.info(f"  最大旋转误差:   {np.max(rerr)*1000:7.2f} mrad")
+        logger.info(f"  位置标准差:     {np.std(p, axis=0)*1000:.2f} mm")
+        logger.info(f"  关节力矩均值:   {np.round(np.mean(tau, axis=0), 2)} Nm")
+        logger.info(f"  关节力矩标准差: {np.round(np.std(tau, axis=0), 3)} Nm")
+
+        # 结论 (基于稳态误差)
+        pass_t, warn_t = (0.01, 0.05) if task == 'regulation' else (0.02, 0.06)
+        max_ss = float(np.max(err_ss))
+        logger.info(f"\n{'='*50}")
+        if max_ss < pass_t:
+            logger.info(f"  ✅ 保持/跟踪通过 (稳态最大误差 ±{max_ss*1000:.1f} mm)")
+        elif max_ss < warn_t:
+            logger.info(f"  ⚠️  基本通过 (稳态最大误差 ±{max_ss*1000:.1f} mm)")
+            logger.info(f"     建议增大带宽或检查 URDF 惯性参数")
+        else:
+            logger.warning(f"  ❌ 偏差过大 (稳态最大误差 {max_ss*1000:.1f} mm)")
+            logger.warning(f"     请检查: URDF 惯性参数 / 控制频率 / 带宽 / 轨迹参数")
+        logger.info(f"{'='*50}")
+
+    if save_log and summary['t'].size > 0:
+        np.savez(save_log,
+                 t=summary['t'], p=summary['p'], q=summary['q'],
+                 tau=summary['tau'], pos_err=summary['err'],
+                 rot_err=summary['rerr'])
+        logger.info(f"  已保存记录: {save_log}")
+
+
+# ====================================================================
+# 6. 干跑 (连接 + FK 自检, 不发力矩)
+# ====================================================================
+
+def run_dry_run(hw, robot_model):
+    """连接 + 运动学自检, 不发任何力矩."""
+    logger = logging.getLogger("run_se3_control")
+    logger.info("干跑模式: 仅连接 + 运动学自检, 不发任何力矩")
+    q, dq = hw.get_joint_states()
+    robot_model.update(q, dq)
+    p, _ = robot_model.get_pose()
+    logger.info(f"  关节位置 q:   {np.round(q, 4)}")
+    logger.info(f"  关节速度 dq:  {np.round(dq, 6)}")
+    logger.info(f"  末端位置 p:   {np.round(p, 4)} m")
+    err_state = hw.get_error_state()
+    logger.info(f"  错误状态:     {err_state} ({'正常' if err_state == 0 else '异常!'})")
+    sm = hw.get_safety_mode()
+    if sm is not None:
+        logger.info(f"  安全模式:     {sm[0]} ({sm[1]})")
+    raw_bits = hw.get_safety_status_bits()
+    if raw_bits is not None:
+        logger.info(f"  安全状态位:   0b{raw_bits:032b} (0x{raw_bits:08X})")
+    if err_state != 0:
+        raise RuntimeError(f"机器人错误状态 {err_state}, 请检查教示器")
+    logger.info("干跑完成 ✅ — 链路与模型正常, 可进入实机运行")
+
+
+# ====================================================================
+# 6.5 预览模式辅助 (MuJoCo 闭环仿真 + 碰撞判定, 不连接硬件)
+# ====================================================================
+
+def resolve_main_bandwidth(args, logger):
+    """servoJ 模式应用带宽上限 (级联稳定性), 返回主阶段有效带宽."""
+    main_bandwidth = args.bandwidth
+    if args.control_mode == 'servoJ' and args.bandwidth > args.servo_bandwidth_cap:
+        main_bandwidth = args.servo_bandwidth_cap
+        logger.warning(
+            f"servoJ 模式: --bandwidth {args.bandwidth} 超过位置伺服级联上限 "
+            f"{args.servo_bandwidth_cap}, 主阶段有效带宽降至 {main_bandwidth} rad/s "
+            f"(内层 UR 伺服带宽有限, 参考积分会跑赢伺服而发散; 用 --servo-bandwidth-cap 调整)")
+    return main_bandwidth
+
+
+def build_task_trajectory(args, robot_model, robot_cfg, logger):
+    """按 --task 构建轨迹, 应用 --center/--radius 覆盖, 并做 IK 可达性预检.
+
+    对 regulation 返回 (None, None). 预检未通过时 traj_task=None.
+
+    :returns: (traj_task, task_cfg) — task_cfg 为按 --robot 匹配的任务参数
+              namespace (已应用命令行覆盖, 供预览/实机共用)
+    """
+    if args.task == 'regulation':
+        return None, None
+    from config import task_config
+    task_cfg = task_config.get_task_config(args.robot)
+    # 命令行覆盖圆心/半径 (仅 circle/line; 改的是 get_task_config 返回的
+    # namespace 内部分拷贝, 不影响 task_config 模块级全局配置)
+    if args.center is not None:
+        tdict = getattr(task_cfg, args.task, None)
+        if isinstance(tdict, dict) and 'center' in tdict:
+            tdict['center'] = list(args.center)
+            logger.info(f"[轨迹] --center 覆盖 {args.task} 中心 → {list(args.center)} m")
+        else:
+            logger.warning(f"--center 对任务 '{args.task}' 无效 (仅 circle/line)")
+    if args.radius is not None and args.task == 'circle':
+        task_cfg.circle['radius'] = args.radius
+        logger.info(f"[轨迹] --radius 覆盖 circle 半径 → {args.radius} m")
+    traj_task = build_trajectory(args.task, cfg=task_cfg)
+    logger.info(f"[轨迹] {args.task}: 中心 {np.round(traj_task.pd_t(0.0).ravel(), 3)} m "
+                f"(起点 t=0)")
+    if not args.no_feasibility:
+        ok, _ = check_trajectory_feasibility(
+            robot_model, traj_task, robot_cfg['home_q'], args.duration,
+            n_samples=args.feasibility_samples)
+        if not ok:
+            logger.error("可达性预检未通过 — 中止运行")
+            return None, task_cfg
+    return traj_task, task_cfg
+
+
+def run_preview_cli(args, cfg, robot_model, torque_limits, logger):
+    """--preview 入口: 在 MuJoCo 里跑与实机 Phase2 相同的闭环任务.
+
+    不连接硬件. 同一套 CLI 参数 (轨迹/带宽/阻尼/力矩限幅/混合), 复用
+    core.mujoco_preview.run_preview (directTorque 发力矩, servoJ 走桥+内层伺服),
+    末端轨迹实时可视化 + 自动碰撞判定.
+
+    :returns: bool — True=无碰撞风险 (可去掉 --preview 上真机)
+    """
+    from config import task_config
+    from core.mujoco_preview import run_preview
+
+    # 构建轨迹 (应用 --center/--radius 覆盖 + 参考级 IK 预检)
+    if args.task == 'regulation':
+        traj_task, task_cfg = None, task_config.get_task_config(args.robot)
+    else:
+        traj_task, task_cfg = build_task_trajectory(args, robot_model, cfg, logger)
+        if traj_task is None:
+            return False
+
+    if traj_task is None:
+        # regulation: 预览假设臂从 home 起步, 保持 home 位姿
+        robot_model.update(cfg['home_q'])
+        pd, Rd = robot_model.get_pose()
+        traj = make_static_traj(pd, Rd)
+    else:
+        traj = traj_task
+
+    main_bandwidth = resolve_main_bandwidth(args, logger)
+
+    logger.info(f"\n{'='*70}")
+    logger.info(f"  MuJoCo 闭环预览 [{cfg['name']}]  任务={args.task}  模式={args.control_mode}")
+    logger.info(f"  带宽 {main_bandwidth} rad/s | 时长 {args.duration}s | 混合 {args.blend_time}s")
+    if args.preview_start_q is not None:
+        logger.info(f"  起步位形: --preview-start-q = "
+                    f"{np.round(args.preview_start_q, 3)} (真机当前位形)")
+    else:
+        logger.info(f"  起点假设: home_q (真机从当前位姿起步; 臂不在 home 时 "
+                    f"用 --dry-run 读当前 q 传 --preview-start-q)")
+    logger.info(f"  {'可视化窗口 (关闭窗口可提前结束)' if not args.no_viewer else 'headless — 仅碰撞结论'}")
+    logger.info(f"{'='*70}")
+
+    start_q = args.preview_start_q if args.preview_start_q is not None \
+        else cfg['home_q']
+    res = run_preview(
+        args.robot, get_urdf_path(args.robot), cfg['ee_frame'], cfg['home_q'],
+        traj, task_cfg=task_cfg, bandwidth=main_bandwidth, damping=args.damping,
+        torque_limits=torque_limits, duration=args.duration, ctrl_dt=args.dt,
+        blend_time=args.blend_time, control_mode=args.control_mode,
+        show_viewer=not args.no_viewer, speed=args.preview_speed,
+        link_to_mesh=cfg['link_to_mesh'], mesh_subdir=cfg['mesh_subdir'],
+        start_q=start_q, logger=logger, log_dir=args.log_dir,
+    )
+
+    if res['verdict']['ok']:
+        logger.info(f"\n  预览通过 — 无碰撞风险. 去掉 --preview 即可用相同参数上真机.")
+        return True
+    logger.warning(f"\n  预览发现碰撞风险 — 请调整 --center/--radius/带宽后重跑预览, 勿直接上真机.")
+    return False
+
+
+# ====================================================================
+# 7. 主入口
+# ====================================================================
+
+def main():
+    args = parse_args()
+    cfg = get_robot_config(args.robot)
+    RobotHW = get_hw_class(args.robot)
+    robot_name = cfg['name']
+    torque_limits = cfg['torque_limits'] * args.torque_scale
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s.%(msecs)03d] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logger = logging.getLogger("run_se3_control")
+
+    print("=" * 70)
+    print(f"  SE(3) GIC 控制 — 实机执行 [{robot_name}]")
+    print("=" * 70)
+    print(f"\n   机器人:        {robot_name}")
+    print(f"   任务:          {args.task}")
+    print(f"   控制频率:      {1/args.dt:.0f} Hz")
+    print(f"   控制模式:      {args.control_mode} "
+          f"({'CB3 servoJ 回退' if args.control_mode == 'servoJ' else 'directTorque 力矩'})")
+    print(f"   主带宽:        {args.bandwidth} rad/s")
+    if args.skip_phase0:
+        print(f"   Phase0:        已跳过 (--skip-phase0)")
+    else:
+        print(f"   Phase0 带宽:   {args.hold_bandwidth} rad/s")
+    print(f"   时长:          {'主阶段' if args.skip_phase0 else f'Phase0 {args.hold_time}s → 主'} {args.duration}s")
+    if args.task != 'regulation':
+        print(f"   起步混合:      {args.blend_time}s")
+        print(f"   可达性预检:    {'跳过' if args.no_feasibility else f'{args.feasibility_samples} 采样点'}")
+    print(f"   力矩限幅:      {np.round(torque_limits, 1)} Nm")
+    if args.preview:
+        print(f"\n   🔎 预览模式: 不连接硬件, 在 MuJoCo 仿真里跑同一任务")
+        print(f"     实时看轨迹 + 自动碰撞判定 (✓/✗), 通过后再去掉 --preview 上真机")
+    print(f"\n   ⚠️  安全提醒:")
+    print(f"     1. 教示器处于 远程控制(Remote Control) 模式")
+    print(f"     2. 臂周围无人/障碍物, 急停按钮可触及")
+    if args.skip_phase0:
+        print(f"     3. 已跳过 Phase 0 自检, 主阶段直接起步 (留意首发力矩)")
+    else:
+        print(f"     3. Phase 0 为低带宽自检, 若异常臂会缓慢偏位 (非急动)")
+    print(f"     4. 轨迹任务会先做可达性预检; 起步有 {args.blend_time:.1f}s 混合过渡")
+    print(f"     5. 随时可按急停或 Ctrl+C\n")
+
+    # ── 初始化模型与硬件 ──
+    urdf_path = get_urdf_path(args.robot)
+    ip = args.ip if args.ip else cfg['default_ip']
+
+    logger.info("初始化 RobotModel ...")
+    robot_model = RobotModel(urdf_path, ee_frame_name=cfg['ee_frame'],
+                             robot_name=robot_name, verbose=True)
+
+    # ── 预览模式: 不连接硬件, 在 MuJoCo 里跑同一任务闭环仿真 + 碰撞判定 ──
+    if args.preview:
+        if args.dry_run:
+            logger.error("--preview 与 --dry-run 互斥 (预览不连接硬件)")
+            sys.exit(2)
+        ok = run_preview_cli(args, cfg, robot_model, torque_limits, logger)
+        sys.exit(0 if ok else 1)
+
+    logger.info(f"初始化 {robot_name}HW @ {ip} ...")
+    hw = RobotHW(ip=ip, dt=args.dt, verbose=True)
+
+    try:
+        hw.initialize()
+        # 在硬件层也套用 (可能被缩放的) 限幅, 双保险
+        hw.set_torque_limits(torque_limits)
+
+        if args.control_mode == 'servoJ':
+            hw.set_servo_mode(True)
+            logger.info(
+                f"servoJ 回退已启用: gain={args.servo_gain} "
+                f"lookahead={args.servo_lookahead}s "
+                f"qdd_max={args.servo_qdd_max}rad/s² dq_max={args.servo_dq_max}rad/s")
+
+        if args.dry_run:
+            run_dry_run(hw, robot_model)
+            return
+
+        # 当前位姿 (Phase0 保持期望 + 轨迹混合起点)
+        q, dq = hw.get_joint_states()
+        robot_model.update(q, dq)
+        pd, Rd = robot_model.get_pose()
+        logger.info(f"当前末端位置: {np.round(pd, 4)} m")
+
+        # ── 轨迹任务: 构建轨迹 + IK 可达性预检 (与预览共用同一逻辑) ──
+        traj_task, _ = build_task_trajectory(args, robot_model, cfg, logger)
+        if args.task != 'regulation' and traj_task is None:
+            return
+
+        # 重置周期定时器 (连接后可能已过较长时间)
+        try:
+            hw._ctrl.initPeriod()
+        except Exception:
+            pass
+
+        if args.skip_phase0:
+            input("\n   按 Enter 开始主阶段 (已跳过 Phase 0 自检) ...")
+        else:
+            input("\n   按 Enter 开始 Phase 0 自检 ...")
+
+        # ── Phase 0: 低带宽保持自检 (当前位姿) ──
+        # --skip-phase0 时跳过 (调试/快速验证用); 主阶段同样每周期做安全检查,
+        # 若主阶段仍触发急停, 说明是检测或首发力矩问题, 而非 Phase 0 本身.
+        # servoJ 级联要求外环带宽 < 内层伺服带宽; 超过上限时限制并告警
+        main_bandwidth = resolve_main_bandwidth(args, logger)
+
+        def make_bridge(ctrl):
+            """servoJ 模式构建力矩→关节目标位桥接器; directTorque 模式返回 None."""
+            if args.control_mode != 'servoJ':
+                return None
+            return ServoJTorqueBridge(
+                robot_model, ctrl, args.dt,
+                qdd_max=np.full(robot_model.nv, args.servo_qdd_max),
+                dq_max=np.full(robot_model.nv, args.servo_dq_max),
+                ref_damp=args.servo_ref_damp)
+
+        if not args.skip_phase0:
+            phase0_bandwidth = min(args.hold_bandwidth, main_bandwidth)
+            ctrl0 = GICController(robot_model, bandwidth=phase0_bandwidth,
+                                  damping=args.damping, torque_limits=torque_limits)
+            traj0 = make_static_traj(pd, Rd)
+            s0 = run_tracking(hw, robot_model, ctrl0, traj0, args.hold_time,
+                              args.dt, "Phase0", logger, blend_time=0.0,
+                              bridge=make_bridge(ctrl0), log_dir=args.log_dir)
+            if s0['stopped']:
+                logger.error("Phase 0 自检因错误状态中止 — 不进入主阶段")
+                return
+
+        # ── Phase 2: 主阶段 ──
+        ctrl = GICController(robot_model, bandwidth=main_bandwidth,
+                             damping=args.damping, torque_limits=torque_limits)
+        bridge2 = make_bridge(ctrl)
+        if args.task == 'regulation':
+            # 重新读当前位姿 (Phase0 后可能微漂) 作为期望
+            q, dq = hw.get_joint_states()
+            robot_model.update(q, dq)
+            pd, Rd = robot_model.get_pose()
+            traj2 = make_static_traj(pd, Rd)
+            s = run_tracking(hw, robot_model, ctrl, traj2, args.duration,
+                             args.dt, "Phase2", logger, blend_time=0.0,
+                             bridge=bridge2, log_dir=args.log_dir)
+        else:
+            s = run_tracking(hw, robot_model, ctrl, traj_task, args.duration,
+                             args.dt, "Phase2", logger,
+                             blend_time=args.blend_time, bridge=bridge2,
+                             log_dir=args.log_dir)
+
+        print_summary(s, robot_name, save_log=args.save_log, task=args.task)
+
+        # ── Phase 3: 释放确认 (正常结束时) ──
+        # 停转后 shutdown 会发零力矩, 臂失去重力补偿可能下沉;
+        # 在 Enter 前臂保持最后一次力矩指令, 由操作者掌控释放时机.
+        if not s['stopped']:
+            input("\n   按 Enter 释放机械臂并停机 ...")
+
+    except KeyboardInterrupt:
+        logger.warning("\n\n用户终止 — 执行急停")
+        hw.emergency_stop()
+    except Exception as e:
+        logger.error(f"运行失败: {e}")
+        hw.emergency_stop()
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        hw.shutdown()
+
+    logger.info("运行结束 — 已安全停机")
+
+
+if __name__ == '__main__':
+    main()

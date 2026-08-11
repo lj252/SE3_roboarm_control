@@ -24,6 +24,8 @@ from typing import Callable, NamedTuple, Tuple
 
 import numpy as np
 
+from .se3_math import hat_map, vee_map
+
 
 # ====================================================================
 # 类型定义
@@ -154,6 +156,40 @@ def build_trajectory(task: str, cfg=None) -> TrajectoryFuncs:
         ddpd_t = sp.lambdify(t, ddpd_t_sim, "numpy"),
         ddRd_t = sp.lambdify(t, ddRd_t_sim, "numpy"),
     )
+
+
+# ====================================================================
+# 轨迹 → 体坐标系期望速度/加速度
+# ====================================================================
+
+def eval_body_twist(funcs: TrajectoryFuncs, t: float, Rd: np.ndarray,
+                    bf: float = 1.0) -> Tuple[np.ndarray, ...]:
+    """求值轨迹在时刻 t 的体坐标系期望速度/加速度 (GIC 控制器所需).
+
+    GICController.compute 的期望输入以末端的**体坐标系**表示:
+      vd  = Rdᵀ · ṗ_d          期望线速度
+      wd  = vee(Rdᵀ · Ṙ_d)     期望角速度
+      dvd = Rdᵀ · p̈_d − ŵd·Rdᵀ·ṗ_d   期望线加速度
+      dwd = vee(Rdᵀ · R̈_d − ŵd·Rdᵀ·Ṙ_d)  期望角加速度
+
+    :param funcs: TrajectoryFuncs (build_trajectory 的返回值)
+    :param t:     求值时刻 (s)
+    :param Rd:    期望朝向 (3,3) — 传入**起步混合后** (slerp) 的朝向,
+                  保证速度/加速度与位姿在同一体系
+    :param bf:    起步混合因子 ∈ [0,1], 缩放前馈速度/加速度, 默认 1.0
+    :returns: (vd, wd, dvd, dwd) — 各为 (3,1) 列向量
+    """
+    dpd = funcs.dpd_t(t).ravel() * bf
+    dRd = funcs.dRd_t(t).reshape(3, 3) * bf
+    ddpd = funcs.ddpd_t(t).ravel() * bf
+    ddRd = funcs.ddRd_t(t).reshape(3, 3) * bf
+
+    vd = Rd.T @ dpd.reshape((-1, 1))
+    wd = vee_map(Rd.T @ dRd)
+    dvd = (Rd.T @ ddpd.reshape((-1, 1))
+           - hat_map(wd) @ Rd.T @ dpd.reshape((-1, 1)))
+    dwd = vee_map(Rd.T @ ddRd - hat_map(wd) @ Rd.T @ dRd)
+    return vd, wd, dvd, dwd
 
 
 # ====================================================================

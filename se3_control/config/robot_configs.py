@@ -37,7 +37,7 @@ ROBOT_CONFIGS: Dict[str, Dict[str, Any]] = {
         'urdf':                'ur12e.urdf',
         'ee_frame':            'tool0',
 
-        # 网络
+        # 网络 (UR12e 控制箱 IP; 注意与 UR3 不同, 不要误用 .11)
         'default_ip':          '192.168.1.100',
 
         # 关节力矩安全限幅 (Nm) — URDF effort 的 50%
@@ -91,6 +91,9 @@ ROBOT_CONFIGS: Dict[str, Dict[str, Any]] = {
 
     # ────────────────────────────────────────────────────────────
     # UR3
+    # 2026-08-11 基座坐标系已校准 (ur3.urdf): shoulder_pan 基座 yaw180°
+    # + flange-tool0 沿 tool0 +z 偏移 0.126 m → 模型 FK(tool0) == RTDE actual_TCP_pose
+    #   FK(home_q) = (-0.350, 0.000, 0.224); 任务圆心用 task_config 的实机坐标
     # ────────────────────────────────────────────────────────────
     'ur3': {
         'name':                'UR3',
@@ -101,7 +104,7 @@ ROBOT_CONFIGS: Dict[str, Dict[str, Any]] = {
         'urdf':                'ur3.urdf',
         'ee_frame':            'tool0',
 
-        'default_ip':          '192.168.1.101',   # 默认可通过 --ip 覆盖
+        'default_ip':          '192.168.1.11',   # 默认可通过 --ip 覆盖
 
         # 关节力矩安全限幅 (Nm) — URDF effort 的 50%
         'torque_limits':       np.array([
@@ -148,10 +151,9 @@ ROBOT_CONFIGS: Dict[str, Dict[str, Any]] = {
             'wrist_3_link':      'wrist3',
         },
 
-        # 任务参数注释: UR3 工作空间小, 运行 circle/line 等任务时
-        # 建议修改 task_config.py 中的圆心/半径/增益等参数。
-        # 参考 task_config.py 中各 section 的"小机械臂(UR3)推荐"注释。
-        # 'task_params':  (已移除, 统一在 task_config.py 中管理)
+        # 任务参数注释: UR3 工作空间小, circle/line 的圆心/半径/速度等
+        # 在 task_config.py 的 ROBOT_TASK_CONFIGS['ur3'] 中按机器人配置,
+        # run_se3_control.py / verify_*_mujoco.py 按 --robot 自动匹配.
     },
 }
 
