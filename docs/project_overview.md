@@ -853,7 +853,7 @@ Vd = np.hstack((vd, wd)).reshape((-1, 1))   # 错误
   z-std 0.11 mm，圆恢复水平。
 
 **修复**（已应用，74 个测试通过）：先 `ravel()` 到 (3,) 再 `np.concatenate`，得到块序 `[v; w]`：
-`gic_controller.py:100` 与 `monitor_sim.py` 同处一并修正（monitor 里也犯了一样的错误，
+`gic_controller.py:100` 与 `tests/monitor/monitor_sim.py` 同处一并修正（monitor 里也犯了一样的错误，
 解释了此前 §11.3 里"仿真带宽仅 0.5"的假象——重建 τ 用了同样错位的 Vd，拟合出来的
 "低带宽"是重建伪影；修复后 `--fit-bandwidth` 精确拟合回 ω_eff=6.001、残差 0.0 mN·m）。
 
@@ -866,10 +866,12 @@ GUFIC 尚未实现（Phase 3 预留），无此问题。全部 74 个测试通�
 
 **遗留疑问（下次继续）**：控制器修复后真机重跑是否同样恢复水平（仿真已确认）。
 
-**监控脚本**：`monitor_sim.py`（仓库根目录）——逐周期重建 GIC 内部量，盯 z 行强迫分解：
+**监控脚本**：`tests/monitor/monitor_sim.py`——逐周期重建 GIC 内部量，盯 z 行强迫分解：
 `dVd*_z`、`FF_z = (M̃·dVd*)_z`、`e_op_z`/`ev_z`、`corr_z`、`plant_cmd_z = (M̃inv·τ̃)_z`、
 `Ĵb·q̇`、`resid_z`，外加平面拟合与 `--fit-bandwidth`（修复后拟合回 ω_eff=6.001）。
-用法：`python monitor_sim.py --robot ur3 --task circle --csv logs/mon_dt_fix --fit-bandwidth`。
+用法：`python tests/monitor/monitor_sim.py --robot ur3 --task circle --csv logs/mon_dt_fix --fit-bandwidth`。
+（监控工具集统一在 `tests/monitor/`：`analyze_arm_log.py` / `monitor_rtde.py` / `monitor_sim.py` /
+`check_calibration.py` / `go_home.py`；实验性连通脚本在 `tests/other/`。）
 
 ---
 

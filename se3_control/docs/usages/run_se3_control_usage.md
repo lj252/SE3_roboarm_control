@@ -184,8 +184,9 @@ python se3_control/scripts/run_se3_control.py --robot ur12e --task line \
 
 ### 4.1 诊断: 记录 + 对照（"仿真正常、真机乱动"排查）
 
-实机跑任务时用 `--log-dir` 记录每控制周期全分辨率数据, 同时开 `monitor_rtde.py`
-（只读录 RTDE 原始数据）, 事后用 `analyze_arm_log.py` 出图 + 自动判定, 与仿真
+实机跑任务时用 `--log-dir` 记录每控制周期全分辨率数据, 同时开
+`tests/monitor/monitor_rtde.py`（只读录 RTDE 原始数据）, 事后用
+`tests/monitor/analyze_arm_log.py` 出图 + 自动判定, 与仿真
 （`--preview --log-dir`）逐列对照。完整工作流与信号解读见
 `se3_control/docs/analysis/real_vs_sim_diagnostics.md`。
 

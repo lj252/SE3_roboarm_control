@@ -212,6 +212,155 @@ class TestServoBridgeReset(unittest.TestCase):
 
 
 # ====================================================================
+# 1b. 速度缩放感知 (方案 A, real_vs_sim_diagnostics.md §8.4-A)
+# ====================================================================
+
+class TestServoBridgeSpeedFraction(unittest.TestCase):
+    """实机降速 (RTDE speed_scaling < 1.0) 时参考上限按 s 缩放, 防参考
+    积分跑赢被限速的臂而发散 (run_04 根因: s=0.24 时 dq_max 仍 2.0 rad/s)."""
+
+    def setUp(self):
+        self.robot = _robot()
+        cfg = _ROBOT_CFG
+        self.ctrl = _make_ctrl(self.robot, bandwidth=10.0,
+                               torque_limits=cfg['torque_limits'])
+        # 默认 dt=0.004 → 上升爬升速率 = dt·_SPEED_RAMP_UP = 0.002/步
+
+    def _bridge(self, **kw):
+        return ServoJTorqueBridge(self.robot, self.ctrl, dt=0.004, **kw)
+
+    def test_constructor_scales_limits(self):
+        """构造时传 speed_fraction=s → dq_max/qdd_max 立即按 s 缩放."""
+        s = 0.25
+        bridge = self._bridge(speed_fraction=s)
+        self.assertAlmostEqual(bridge.speed_fraction, s, places=6)
+        np.testing.assert_allclose(bridge._dq_max, bridge._dq_max_base * s)
+        np.testing.assert_allclose(bridge._qdd_max, bridge._qdd_max_base * s)
+        # 基值本身不受影响 (可恢复)
+        self.assertTrue(np.all(bridge._dq_max_base > bridge._dq_max))
+
+    def test_set_speed_fraction_fast_fall(self):
+        """下降立即生效: 单步 s:1.0→0.24 后 speed_fraction 直接到 0.24."""
+        bridge = self._bridge(speed_fraction=1.0)
+        out = bridge.set_speed_fraction(0.24)
+        self.assertAlmostEqual(out, 0.24, places=6)
+        self.assertAlmostEqual(bridge.speed_fraction, 0.24, places=6)
+        np.testing.assert_allclose(bridge._dq_max, bridge._dq_max_base * 0.24)
+
+    def test_set_speed_fraction_slow_rise(self):
+        """上升缓慢爬升: 单步 0.24→1.0 只爬到 0.24+dt·0.5, 不突跳."""
+        bridge = self._bridge(speed_fraction=0.24)
+        out = bridge.set_speed_fraction(1.0)
+        expected = 0.24 + bridge.dt * 0.5
+        self.assertAlmostEqual(out, expected, places=6)
+        self.assertAlmostEqual(bridge.speed_fraction, expected, places=6)
+
+    def test_set_speed_fraction_eventually_converges(self):
+        """持续请求 1.0 时爬升至满速 (多步收敛)."""
+        bridge = self._bridge(speed_fraction=0.0)
+        for _ in range(1000):   # 1000 步 × 0.002 = 2s > (1-0)/0.5
+            bridge.set_speed_fraction(1.0)
+        self.assertGreaterEqual(bridge.speed_fraction, 1.0 - 1e-9)
+
+    def test_reset_uses_scaled_dq_max(self):
+        """降速下 reset 的 dq 限幅用缩放后的上限 (而非满速)."""
+        bridge = self._bridge(speed_fraction=0.24)
+        big = np.full(self.robot.nv, 99.0)
+        bridge.reset(_ROBOT_CFG['home_q'].copy(), big)
+        np.testing.assert_allclose(np.abs(bridge._dq_des), bridge._dq_max)
+        np.testing.assert_allclose(np.abs(bridge._dq_des),
+                                   bridge._dq_max_base * 0.24)
+
+    def test_compute_reference_cap_reflects_fraction(self):
+        """compute 步进下参考速度被缩放后的 dq_max 限幅 (防跑赢限速臂)."""
+        s = 0.2
+        bridge = self._bridge(speed_fraction=s)
+        q = _ROBOT_CFG['home_q'].copy()
+        dq = np.zeros(self.robot.nv)
+        bridge.reset(q, dq)
+        # 持续请求大步进 (大误差 → 参考积分持续逼近 dq_max)
+        robot = self.robot
+        robot.update(q, dq)
+        p0, R0 = robot.get_pose()
+        pd = p0 + np.array([0.10, 0.0, 0.0])
+        Rd = R0.copy()
+        for _ in range(200):
+            bridge.compute(q, dq, pd, Rd,
+                           np.zeros(3), np.zeros(3),
+                           np.zeros(3), np.zeros(3))
+        self.assertLessEqual(float(np.max(np.abs(bridge._dq_des))),
+                             float(np.max(bridge._dq_max)) + 1e-9)
+        self.assertLessEqual(float(np.max(np.abs(bridge._dq_des))),
+                             float(np.max(bridge._dq_max_base * s)) + 1e-9)
+
+    def test_clip_out_of_range(self):
+        """越界输入被夹到 [1e-3, 1.0]."""
+        bridge = self._bridge(speed_fraction=1.0)
+        bridge.set_speed_fraction(-5.0)
+        self.assertGreaterEqual(bridge.speed_fraction, 1e-3)
+        bridge.set_speed_fraction(3.0)
+        self.assertLessEqual(bridge.speed_fraction, 1.0)
+
+    def test_ref_damp_not_scaled_by_speed_fraction(self):
+        """ref_damp 不随 speed_fraction 缩放 (保持基值).
+
+        run_05b 实测否决了 1/s 放大: 24% 降速下臂刹不住、以超参考的速度下坠
+        (dq 0.65 > 上限 0.48) 时, 放大的 ref_damp 把参考拉向实测 dq → 参考满速
+        往下追 → GIC 纠正加速度被压过 → 坠向基部. 保持基值: 参考不镜像下坠,
+        GIC 能把它拉回. 级联稳定性由带宽×s 与参考上限×s 保证.
+        """
+        base = 15.0
+        bridge = self._bridge(speed_fraction=1.0)
+        self.assertAlmostEqual(bridge._ref_damp, base, places=6)
+        bridge.set_speed_fraction(0.24)
+        self.assertAlmostEqual(bridge._ref_damp, base, places=6)   # 不放大
+        for _ in range(100):
+            bridge.set_speed_fraction(0.077)
+        self.assertAlmostEqual(bridge._ref_damp, base, places=6)   # 极低速也不变
+
+    def test_ref_damp_used_in_compute(self):
+        """compute 的参考积分使用基值阻尼; 参考速度/加速度上限仍按 s 缩放."""
+        s = 0.24
+        bridge = self._bridge(speed_fraction=s)
+        self.assertAlmostEqual(bridge._ref_damp, 15.0, places=6)   # 阻尼不缩放
+        self.assertAlmostEqual(bridge._dq_max[0], 2.0 * s, places=6)  # 上限缩放
+        self.assertAlmostEqual(bridge._qdd_max[0], 20.0 * s, places=6)
+
+    def test_track_gate_blocks_chase_when_servo_lost(self):
+        """伺服丢跟踪 (|参考−臂|>0.15 rad) 时, 参考只刹不追 — 防坠落时参考被拖走.
+
+        run_05b 根因: 24% 降速下臂刹不住、以超参考的速度下坠 (dq 0.65>上限 0.48),
+        对称阻尼把参考拉向实测 dq → 参考满速往下追 → GIC 纠正加速度被压过 → 坠向基部.
+        门限后: 臂领先下坠时 (lag>0) 阻尼项 = 0, 参考只随 GIC 命令走, 不放大速度.
+        """
+        bridge = self._bridge(speed_fraction=0.24)
+        self.assertAlmostEqual(bridge._dq_track_gate, 0.15, places=6)
+        robot = bridge.robot
+        nv = robot.nv
+        q = _ROBOT_CFG['home_q'].copy()
+        robot.update(q, np.zeros(nv))
+        p0, R0 = robot.get_pose()
+
+        def one_step(q_des_err, dqd=0.05, dq_fall=0.2):
+            """同 q/dq 状态, 只变参考-臂误差, 返回 dq_des 的 Δ."""
+            b = self._bridge(speed_fraction=0.24)
+            b.reset(q, np.zeros(nv))
+            b._q_des = q + q_des_err
+            b._dq_des = np.full(nv, dqd)
+            before = b._dq_des.copy()
+            b.compute(q, np.full(nv, dq_fall), p0, R0,
+                      np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3))
+            return b._dq_des - before
+
+        d_lost = one_step(0.2)     # 参考-臂误差 0.2 > 门限 0.15 → 只刹不追
+        d_ok = one_step(0.02)      # 0.02 < 门限 → 对称阻尼 (允许追臂耦合)
+        # 丢跟踪: 阻尼项=0, 参考不因臂领先而加速 → 明显减速 (对称会把追臂 +15*0.15*dt≈+0.009 加回)
+        self.assertLess(d_lost[2], -0.006, f"丢跟踪后参考仍在追下坠臂: Δdq_des={d_lost}")
+        # 正常跟踪: 保留对称耦合 → 比丢跟踪情况更不减速 (追臂 boost 在)
+        self.assertGreater(d_ok[2], d_lost[2], "正常跟踪的对称耦合应比丢跟踪更不减速")
+
+
+# ====================================================================
 # 2. 任务空间一致性 (桥接数学根基)
 # ====================================================================
 

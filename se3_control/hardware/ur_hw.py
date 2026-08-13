@@ -294,6 +294,26 @@ class URHW(RobotHWInterface):
 
         return self._last_q.copy(), self._last_dq.copy()
 
+    def get_speed_scaling(self) -> float:
+        """读取 RTDE 组合速度缩放 — 实机实际生效的关节速度上限比例 (0–1).
+
+        优先 ``getSpeedScalingCombined`` (含安全/降级限制; REDUCED 或降速时 < 1.0,
+        如 run_04 恒为 0.24), 失败回退 ``getSpeedScaling``; 未连接返回 1.0.
+        上层 ServoJTorqueBridge 据此缩放参考上限 (dq_max×s), 防参考积分跑赢
+        被限速的臂而发散 (详见 se3_control/docs/analysis/real_vs_sim_diagnostics §8).
+        """
+        if not self._connected or self._recv is None:
+            return 1.0
+        for getter in (self._recv.getSpeedScalingCombined,
+                       self._recv.getSpeedScaling):
+            try:
+                s = getter()
+                if s is not None:
+                    return float(s)
+            except Exception:
+                continue
+        return 1.0
+
     def get_ft_sensor(self) -> np.ndarray:
         """获取末端力/力矩传感器读数。
 

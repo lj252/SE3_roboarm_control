@@ -166,7 +166,8 @@ def run_preview(robot_name, urdf_path, ee_frame, home_q, traj,
                 task_cfg=None, bandwidth=20.0, damping=1.0,
                 torque_limits=None, duration=15.0, ctrl_dt=0.004,
                 blend_time=0.5, control_mode='directTorque',
-                servo_bandwidth=30.0, show_viewer=True, speed=1.0,
+                servo_bandwidth=30.0, servo_speed_fraction=1.0,
+                show_viewer=True, speed=1.0,
                 link_to_mesh=None, mesh_subdir='', start_q=None,
                 logger=None, log_dir=None):
     """MuJoCo 闭环预览: 跑与实机 Phase2 相同的任务, 返回含碰撞判定的结果.
@@ -182,6 +183,9 @@ def run_preview(robot_name, urdf_path, ee_frame, home_q, traj,
                         计算力矩伺服 τ = M·(ddq + 2ω(dq_des−dq) + ω²(q_des−q)) + bias,
                         带宽须明显高于外环 GIC 带宽 (CLI servoJ 上限 10) 才能稳定;
                         之前用裸 PD (无重力补偿/前馈) 在 circle 任务上发散成混乱轨迹.
+    :param servo_speed_fraction: servoJ 回退的实机速度缩放系数 s (0–1), 默认 1.0.
+                        桥接器参考上限 dq_max/qdd_max 按 s 缩放, 与实机被限速的
+                        参考行为一致 (方案 A; 仿真臂本身无速度上限, 故只对齐参考侧).
     :param show_viewer: False → headless, 只出碰撞结论 (测试/冒烟用)
     :param speed: 实时倍速 (>1 加速). 默认 1.0 = 与实机同步节奏.
     :param log_dir: 若给定, 每控制周期写**与实机相同格式**的全分辨率 CSV 到该目录
@@ -238,7 +242,8 @@ def run_preview(robot_name, urdf_path, ee_frame, home_q, traj,
     from core.trajectory import eval_body_twist
     controller = GICController(robot, bandwidth=bandwidth, damping=damping,
                                torque_limits=torque_limits)
-    bridge = ServoJTorqueBridge(robot, controller, ctrl_dt, ref_damp=15.0) \
+    bridge = ServoJTorqueBridge(robot, controller, ctrl_dt, ref_damp=15.0,
+                                speed_fraction=servo_speed_fraction) \
         if control_mode == 'servoJ' else None
     if bridge is not None:
         bridge.reset(q0)

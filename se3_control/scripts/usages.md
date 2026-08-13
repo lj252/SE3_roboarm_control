@@ -113,8 +113,8 @@ python se3_control/scripts/run_se3_control.py --robot ur3 --task circle --durati
 
 ```bash
 # 0) 臂不在 home? 先安全回 home (关节空间 moveJ, 低速, 移动前有危险检查+确认):
-python go_home.py                  # 回 robot_configs 设置的 home_q
-python go_home.py --show-only      # 只查看当前/目标位形 + 危险检查, 不移动
+python tests/monitor/go_home.py                  # 回 robot_configs 设置的 home_q
+python tests/monitor/go_home.py --show-only      # 只查看当前/目标位形 + 危险检查, 不移动
 # 1) 预览 → ✓ 后再上真机 (同一套参数, 只是加/去 --preview)
 python se3_control/scripts/run_se3_control.py --robot ur3 --control-mode servoJ \
     --task circle --duration 16 --bandwidth 10 --preview
@@ -131,7 +131,7 @@ python se3_control/scripts/run_se3_control.py --robot ur3 --task circle \
 > 内层伺服必须用**计算力矩模型**（重力补偿+前馈+临界阻尼）; 裸 PD（无重力补偿/前馈）
 > 在 circle 任务上会因腕部力矩限幅饱和 + 参考积分漂移而发散成混乱轨迹（v0.2 之前）。
 
-### 3.2 实机乱动时的数据取证（--log-dir + monitor_rtde + analyze_arm_log）
+### 3.2 实机乱动时的数据取证（--log-dir + tests/monitor/monitor_rtde + tests/monitor/analyze_arm_log）
 
 仿真正常、真机却向上抬/折叠时, 用三个工具把实机运动过程录下来与仿真逐列对照:
 
@@ -141,14 +141,14 @@ python se3_control/scripts/run_se3_control.py --robot ur3 --control-mode servoJ 
     --task circle --duration 16 --bandwidth 10 --log-dir logs/run_01
 
 # 另一个终端同步录 RTDE 原始数据 (只读, 不影响任务)
-python monitor_rtde.py --robot ur3 --rate 500 --out logs/run_01/rtde.csv
+python tests/monitor/monitor_rtde.py --robot ur3 --rate 500 --out logs/run_01/rtde.csv
 
 # 仿真对照 (同参数 + --preview --log-dir)
 python se3_control/scripts/run_se3_control.py --robot ur3 --control-mode servoJ \
     --task circle --duration 16 --bandwidth 10 --preview --log-dir logs/sim_01
 
 # 分析: 自动判定参考积分漂移/力矩饱和/误差发散/折叠特征 + 出图
-python analyze_arm_log.py --log 'logs/run_01/Phase2_*.csv' --label 实机 \
+python tests/monitor/analyze_arm_log.py --log 'logs/run_01/Phase2_*.csv' --label 实机 \
     --log 'logs/sim_01/sim_*.csv' --label 仿真 --rtde logs/run_01/rtde.csv
 ```
 

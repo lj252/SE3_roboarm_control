@@ -118,6 +118,11 @@ from core.trajectory import build_trajectory, eval_body_twist, TrajectoryFuncs
 from core.se3_math import rotmat_slerp
 from core.arm_log import ArmCsvLogger, arm_log_row
 
+# 速度缩放感知 (方案 A): 每 _SPEED_SCALE_POLL 个控制周期读一次实机 RTDE 组合速度
+# 缩放, 传给桥接器 set_speed_fraction() 缩放参考上限. 缩放变化是安全系统的阶梯
+# 式调整, 40ms 一次足够及时 (降速时桥内立即生效).
+_SPEED_SCALE_POLL = 10
+
 
 # ====================================================================
 # 1. 命令行参数
@@ -170,6 +175,12 @@ def parse_args():
                         help='servoJ 回退: 期望关节速度限幅 (rad/s). 默认 2.0')
     parser.add_argument('--servo-ref-damp', type=float, default=15.0,
                         help='servoJ 回退: 参考速度阻尼 (1/s). 防参考积分跑赢内层伺服而发散. 默认 15')
+    parser.add_argument('--servo-speed-fraction', type=float, default=None,
+                        help='servoJ 回退: 实机速度缩放系数 s (0–1). 默认 None = 启动时 '
+                             '从 RTDE 自动读取实际速度缩放 (REDUCED/降速时 <1.0, 如 0.24). '
+                             '桥接器参考上限 dq_max/qdd_max 按 s 缩放, 防参考积分跑赢被限速的臂 '
+                             '而发散 (方案 A, 见 real_vs_sim_diagnostics §8). '
+                             '预览模式无 RTDE, 默认 1.0; 想预演降速场景可显式给 0.24')
     parser.add_argument('--servo-bandwidth-cap', type=float, default=10.0,
                         help='servoJ 回退: GIC 有效带宽上限 (rad/s). '
                              '位置伺服级联要求外环带宽低于内层伺服带宽, 默认 10')
@@ -197,7 +208,7 @@ def parse_args():
     parser.add_argument('--log-dir', type=str, default=None,
                         help='记录每控制周期全分辨率数据到 CSV (写入此目录, 崩溃时也有数据). '
                              '与 --preview 同用则记仿真; 用于分析真机 vs 仿真差异 '
-                             '(配合 monitor_rtde.py / analyze_arm_log.py)')
+                             '(配合 tests/monitor/monitor_rtde.py / tests/monitor/analyze_arm_log.py)')
     return parser.parse_args()
 
 
@@ -292,6 +303,11 @@ def run_tracking(hw, robot_model, controller, traj, duration, dt,
         # ── 2/3. GIC 控制力矩 → 发力矩 或 servoJ 关节目标位 ──
         q, dq = hw.get_joint_states()
         if bridge is not None:
+            # 速度缩放感知 (方案 A): 周期性读实机实际速度缩放并缩放参考上限,
+            # 防 servoJ 参考积分跑赢被限速的臂 (REDUCED/降速时 s<1.0) 而发散
+            if n % _SPEED_SCALE_POLL == 0 and hasattr(hw, 'get_speed_scaling') \
+                    and hasattr(bridge, 'set_speed_fraction'):
+                bridge.set_speed_fraction(hw.get_speed_scaling())
             # CB3 回退: 力矩折算成 servoJ 关节目标位, 由 UR 内层伺服紧密跟踪
             q_servo, tau = bridge.compute(q, dq, pd, Rd, vd, wd, dvd, dwd)
             hw.set_servo_joint_positions(q_servo)
@@ -560,8 +576,14 @@ def run_dry_run(hw, robot_model):
 # 6.5 预览模式辅助 (MuJoCo 闭环仿真 + 碰撞判定, 不连接硬件)
 # ====================================================================
 
-def resolve_main_bandwidth(args, logger):
-    """servoJ 模式应用带宽上限 (级联稳定性), 返回主阶段有效带宽."""
+def resolve_main_bandwidth(args, logger, speed_fraction=1.0):
+    """servoJ 模式应用带宽上限 (级联稳定性), 返回主阶段有效带宽.
+
+    :param float speed_fraction: 实机速度缩放 s (0–1). 降速时内层 UR 伺服有效带宽
+        也按 s 缩小 → 外环 GIC 带宽上限按 s 缩放, 否则外环跑赢降速内环而发散
+        (run_05_forced 实测: 24% 下 ω=6 发散, λ=+0.31/s, 振荡 1.44 rad/s).
+        这是方案 A 完整版的一部分, 见 real_vs_sim_diagnostics §8.4-A.
+    """
     main_bandwidth = args.bandwidth
     if args.control_mode == 'servoJ' and args.bandwidth > args.servo_bandwidth_cap:
         main_bandwidth = args.servo_bandwidth_cap
@@ -569,6 +591,14 @@ def resolve_main_bandwidth(args, logger):
             f"servoJ 模式: --bandwidth {args.bandwidth} 超过位置伺服级联上限 "
             f"{args.servo_bandwidth_cap}, 主阶段有效带宽降至 {main_bandwidth} rad/s "
             f"(内层 UR 伺服带宽有限, 参考积分会跑赢伺服而发散; 用 --servo-bandwidth-cap 调整)")
+    if args.control_mode == 'servoJ' and speed_fraction < 0.99:
+        omega_eff = main_bandwidth * speed_fraction
+        if omega_eff < main_bandwidth - 1e-9:
+            logger.warning(
+                f"⚠️ 实机速度缩放 {speed_fraction:.2f}: 内层伺服有效带宽按 s 缩小, "
+                f"外环有效带宽降至 {omega_eff:.2f} rad/s "
+                f"(级联稳定, 见 real_vs_sim_diagnostics §8.4-A)")
+            main_bandwidth = omega_eff
     return main_bandwidth
 
 
@@ -637,7 +667,12 @@ def run_preview_cli(args, cfg, robot_model, torque_limits, logger):
     else:
         traj = traj_task
 
-    main_bandwidth = resolve_main_bandwidth(args, logger)
+    # 预览无 RTDE, 速度缩放只能来自 --servo-speed-fraction (None → 满速 1.0);
+    # 想预演"实机被限速"的参考行为可显式传 0.24 (仿真臂本身无速度上限, 只对齐参考侧)
+    servo_speed_fraction = args.servo_speed_fraction \
+        if args.servo_speed_fraction is not None else 1.0
+    main_bandwidth = resolve_main_bandwidth(args, logger,
+                                            speed_fraction=servo_speed_fraction)
 
     logger.info(f"\n{'='*70}")
     logger.info(f"  MuJoCo 闭环预览 [{cfg['name']}]  任务={args.task}  模式={args.control_mode}")
@@ -658,6 +693,7 @@ def run_preview_cli(args, cfg, robot_model, torque_limits, logger):
         traj, task_cfg=task_cfg, bandwidth=main_bandwidth, damping=args.damping,
         torque_limits=torque_limits, duration=args.duration, ctrl_dt=args.dt,
         blend_time=args.blend_time, control_mode=args.control_mode,
+        servo_speed_fraction=servo_speed_fraction,
         show_viewer=not args.no_viewer, speed=args.preview_speed,
         link_to_mesh=cfg['link_to_mesh'], mesh_subdir=cfg['mesh_subdir'],
         start_q=start_q, logger=logger, log_dir=args.log_dir,
@@ -750,6 +786,30 @@ def main():
                 f"lookahead={args.servo_lookahead}s "
                 f"qdd_max={args.servo_qdd_max}rad/s² dq_max={args.servo_dq_max}rad/s")
 
+        # ── 速度缩放感知 (方案 A): 启动读实机实际速度缩放, 桥接器参考上限按 s 缩放 ──
+        # 实机在 REDUCED/降速时 UR 伺服实际最大关节速度 = s×额定; 参考积分器按满速
+        # (dq_max=2 rad/s) 前进会跑赢被限速的臂 → 参考积分漂移 → 力矩饱和 → 发散.
+        # 参考上限 (dq_max/qdd_max) 乘 s 后, 参考速度上限 ≤ 实际能力, 任意降速下稳定.
+        # 运行中 run_tracking 还会每周期继续读速度缩放更新 (安全降速时立即生效).
+        servo_speed_fraction = args.servo_speed_fraction
+        if args.control_mode == 'servoJ' and servo_speed_fraction is None:
+            try:
+                servo_speed_fraction = hw.get_speed_scaling()
+            except Exception as e:
+                logger.warning(f"读取速度缩放失败, 按满速 1.0 处理: {e}")
+                servo_speed_fraction = 1.0
+        if servo_speed_fraction is None:
+            servo_speed_fraction = 1.0
+        if args.control_mode == 'servoJ':
+            if servo_speed_fraction < 0.9:
+                logger.warning(
+                    f"⚠️ 实机速度缩放 = {servo_speed_fraction:.2f} (<1.0, REDUCED/降速). "
+                    f"桥接器参考上限已按 s×dq_max 缩放, 防参考积分跑赢被限速的臂而发散; "
+                    f"任务将按该速度下稳定运行 (详见 real_vs_sim_diagnostics §8).")
+            else:
+                logger.info(f"实机速度缩放 = {servo_speed_fraction:.2f} "
+                            f"({'满速' if servo_speed_fraction >= 0.99 else '降速'})")
+
         if args.dry_run:
             run_dry_run(hw, robot_model)
             return
@@ -779,8 +839,10 @@ def main():
         # ── Phase 0: 低带宽保持自检 (当前位姿) ──
         # --skip-phase0 时跳过 (调试/快速验证用); 主阶段同样每周期做安全检查,
         # 若主阶段仍触发急停, 说明是检测或首发力矩问题, 而非 Phase 0 本身.
-        # servoJ 级联要求外环带宽 < 内层伺服带宽; 超过上限时限制并告警
-        main_bandwidth = resolve_main_bandwidth(args, logger)
+        # servoJ 级联要求外环带宽 < 内层伺服带宽; 超过上限时限制并告警;
+        # 速度缩放感知 (方案A): 降速时内层伺服带宽按 s 缩小 → 外环带宽也按 s 缩放
+        main_bandwidth = resolve_main_bandwidth(args, logger,
+                                                speed_fraction=servo_speed_fraction)
 
         def make_bridge(ctrl):
             """servoJ 模式构建力矩→关节目标位桥接器; directTorque 模式返回 None."""
@@ -790,7 +852,8 @@ def main():
                 robot_model, ctrl, args.dt,
                 qdd_max=np.full(robot_model.nv, args.servo_qdd_max),
                 dq_max=np.full(robot_model.nv, args.servo_dq_max),
-                ref_damp=args.servo_ref_damp)
+                ref_damp=args.servo_ref_damp,
+                speed_fraction=servo_speed_fraction)
 
         if not args.skip_phase0:
             phase0_bandwidth = min(args.hold_bandwidth, main_bandwidth)

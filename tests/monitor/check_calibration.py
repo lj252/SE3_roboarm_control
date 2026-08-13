@@ -41,8 +41,16 @@ import time
 
 import numpy as np
 
-# 让脚本从任意工作目录都能 import se3_control
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# 让脚本从任意工作目录都能 import se3_control (脚本在 tests/monitor/, 项目根在上层)
+def _find_project_root():
+    _d = os.path.dirname(os.path.abspath(__file__))
+    while not os.path.isdir(os.path.join(_d, 'se3_control')):
+        _parent = os.path.dirname(_d)
+        if _parent == _d:
+            raise RuntimeError('找不到含 se3_control/ 的项目根目录')
+        _d = _parent
+    return _d
+_SCRIPT_DIR = _find_project_root()
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
